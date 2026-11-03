@@ -462,6 +462,21 @@ async def handle(u: dict):
         await send_for_review(c)
         return
 
+    # /app (or /app@thisbot): a button that opens the Mini App.
+    cmd = (m.get("text") or "").split()[0].lower() if m and m.get("text") else ""
+    if cmd.split("@")[0] == "/app" and ("@" not in cmd or cmd.endswith("@" + BOT_USERNAME.lower())):
+        chat = m["chat"]
+        if not ORIGIN:
+            await tg("sendMessage", chat_id=chat["id"], text="The app isn't set up yet. Try again later.")
+        elif chat.get("type") == "private":
+            await tg("sendMessage", chat_id=chat["id"], text="Tap below to open Advertise Pro.",
+                     reply_markup={"inline_keyboard": [[{"text": "Open Advertise Pro", "web_app": {"url": ORIGIN + "/"}}]]})
+        else:
+            # Telegram only allows Mini App buttons in private chats, so send people to the bot.
+            await tg("sendMessage", chat_id=chat["id"], text="Open Advertise Pro in a private chat with the bot.",
+                     reply_markup={"inline_keyboard": [[{"text": "Open Advertise Pro", "url": f"https://t.me/{BOT_USERNAME}?start=app"}]]})
+        return
+
     # Someone opens the bot chat. Point them at the Mini App and the promo channel.
     if m and m.get("chat", {}).get("type") == "private" and (m.get("text") or "").startswith("/start"):
         how = "Listing is free for now" if FREE_MODE else "Pay in Stars"
