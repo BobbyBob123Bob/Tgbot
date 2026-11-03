@@ -1,0 +1,326 @@
+<title>Advertise Pro</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  /* Layout: one scrolling screen in Telegram's grouped-list style, with a fixed bottom pay button.
+     Colours follow the user's Telegram theme when launched inside Telegram; otherwise light or dark by system setting. */
+  :root {
+    --page: #efeff4;
+    --section: #ffffff;
+    --text: #000000;
+    --hint: #6d6d72;
+    --link: #2481cc;
+    --button: #3390ec;
+    --button-text: #ffffff;
+    --sep: #d8d8dc;
+    --good: #23913f;
+    --warn: #b86e00;
+    --bad: #d93a35;
+    --font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', Roboto, 'Segoe UI', system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --page: #000000; --section: #1c1c1e; --text: #ffffff; --hint: #98989f; --link: #6ab3f3;
+      --button: #3e88f7; --button-text: #ffffff; --sep: #38383a; --good: #34c759; --warn: #ff9f0a; --bad: #ff6961;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --page: #000000; --section: #1c1c1e; --text: #ffffff; --hint: #98989f; --link: #6ab3f3;
+    --button: #3e88f7; --button-text: #ffffff; --sep: #38383a; --good: #34c759; --warn: #ff9f0a; --bad: #ff6961;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--page);
+    color: var(--text);
+    font: 400 16px/1.35 var(--font);
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 20px 0;
+    min-height: 100vh;
+  }
+  .app { max-width: 480px; margin: 0 auto; padding-bottom: 96px; }
+  h1, h2, p { margin: 0; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+
+  h1 { font-size: 28px; font-weight: 700; line-height: 1.15; letter-spacing: -0.01em; text-wrap: balance; }
+  .lead { color: var(--hint); font-size: 15px; margin-top: 4px; }
+
+  .sec { margin-top: 24px; }
+  .sec-title { font-size: 13px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; color: var(--hint); padding: 0 16px 8px; }
+  .group { background: var(--section); border-radius: 12px; overflow: hidden; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; min-height: 48px; }
+  .row + .row { border-top: 1px solid var(--sep); }
+  .row.col { flex-direction: column; align-items: stretch; gap: 10px; }
+  .row:focus-within { outline: 2px solid var(--link); outline-offset: -2px; }
+  .row.noring:focus-within { outline: 0; }
+  .k { color: var(--text); flex: none; }
+  .at { color: var(--hint); }
+
+  .in { width: 100%; border: 0; outline: 0; background: transparent; padding: 0; min-width: 0; }
+  .in::placeholder { color: var(--hint); opacity: 1; }
+  textarea.in { min-height: 84px; resize: none; display: block; }
+  select.in { appearance: none; text-align: right; color: var(--hint); cursor: pointer; }
+  .count { align-self: flex-end; font-size: 12px; color: var(--hint); font-variant-numeric: tabular-nums; }
+  .note { font-size: 13px; color: var(--hint); padding: 8px 16px 0; }
+  .note.err { color: var(--bad); }
+
+  .seg { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; padding: 3px; background: var(--page); border-radius: 9px; }
+  .seg button { border: 0; background: transparent; padding: 9px 4px; border-radius: 7px; cursor: pointer; font-size: 15px; color: var(--text); }
+  .seg button[aria-checked="true"] { background: var(--section); font-weight: 600; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25); }
+  .seg button:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+
+  .plan { width: 100%; background: none; border: 0; cursor: pointer; text-align: left; }
+  .plan .l { display: flex; align-items: center; gap: 10px; }
+  .plan .chk { width: 18px; color: var(--link); font-weight: 700; }
+  .plan .price { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .plan:focus-visible { outline: 2px solid var(--link); outline-offset: -2px; }
+
+  .bubble { background: var(--page); border-radius: 14px 14px 14px 4px; overflow: hidden; }
+  .bubble .msg { padding: 10px 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .bubble .who { font-weight: 700; margin-bottom: 2px; overflow-wrap: anywhere; }
+  .bubble .tag { font-size: 12px; color: var(--hint); margin-bottom: 4px; }
+  .bubble .cta { border-top: 1px solid var(--sep); text-align: center; padding: 9px; color: var(--link); font-weight: 600; font-size: 15px; }
+
+  .camp { min-width: 0; flex: 1; }
+  .camp .nm { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .camp .meta { font-size: 13px; color: var(--hint); font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .st-live { color: var(--good); font-weight: 600; }
+  .st-awaiting_payment { color: var(--warn); font-weight: 600; }
+  .st-rejected { color: var(--bad); font-weight: 600; }
+  .st-in_review { font-weight: 600; }
+  .act { border: 0; background: none; color: var(--link); font-weight: 600; font-size: 16px; padding: 8px 0 8px 8px; cursor: pointer; flex: none; }
+  .act:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 6px; }
+  .empty { padding: 20px 16px; text-align: center; color: var(--hint); }
+
+  .main { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; background: var(--page); border-top: 1px solid var(--sep);
+    padding: 12px max(16px, env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); }
+  .main button { display: block; width: 100%; max-width: 480px; margin: 0 auto; border: 0; border-radius: 12px; padding: 15px; background: var(--button); color: var(--button-text); font-size: 17px; font-weight: 600; cursor: pointer; }
+  .main button:active { opacity: 0.85; }
+  .main button:disabled { opacity: 0.6; cursor: default; }
+  .main button:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+
+  .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(84px + env(safe-area-inset-bottom, 0px)); background: var(--text); color: var(--page); padding: 10px 16px; border-radius: 999px; font-weight: 600; font-size: 14px; z-index: 20; max-width: calc(100% - 32px); text-align: center; }
+</style>
+
+<div class="app">
+  <h1>Advertise Pro</h1>
+  <p class="lead" id="lead">Promote your Telegram channel or bot.</p>
+
+  <form id="form" novalidate>
+    <section class="sec" aria-labelledby="s-kind">
+      <h2 class="sec-title" id="s-kind">What are you promoting?</h2>
+      <div class="group"><div class="row col noring">
+        <div class="seg" id="kind" role="radiogroup" aria-labelledby="s-kind">
+          <button type="button" role="radio" aria-checked="true" data-k="channel">Channel</button>
+          <button type="button" role="radio" aria-checked="false" data-k="bot">Bot</button>
+        </div>
+      </div></div>
+    </section>
+
+    <section class="sec" aria-labelledby="s-ad">
+      <h2 class="sec-title" id="s-ad">Details</h2>
+      <div class="group">
+        <label class="row" for="f-handle">
+          <span class="k" id="l-handle">Channel</span>
+          <span style="display:flex;align-items:baseline;gap:2px;flex:1;min-width:0;justify-content:flex-end">
+            <span class="at">@</span>
+            <input class="in" id="f-handle" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="username" style="width:auto;flex:1;text-align:left" aria-describedby="e-handle">
+          </span>
+        </label>
+        <div class="row col noring">
+          <textarea class="in" id="f-text" maxlength="200" placeholder="Describe it in a sentence or two" aria-label="Description" aria-describedby="e-text"></textarea>
+          <span class="count"><span id="text-count">0</span>/200</span>
+        </div>
+        <label class="row" for="f-cat">
+          <span class="k">Category</span>
+          <select class="in" id="f-cat">
+            <option>Crypto</option><option>Tech</option><option>News</option><option>Business</option><option>Education</option><option>Entertainment</option><option>Games</option><option selected>Other</option>
+          </select>
+        </label>
+        <label class="row" for="f-lang">
+          <span class="k">Language</span>
+          <select class="in" id="f-lang">
+            <option>Any</option><option>English</option><option>Spanish</option><option>Russian</option><option>Arabic</option><option>Hindi</option>
+          </select>
+        </label>
+      </div>
+      <p class="note" id="n-handle"></p>
+      <p class="note err" id="e-handle" hidden></p>
+      <p class="note err" id="e-text" hidden>Add a short description.</p>
+    </section>
+
+    <section class="sec" id="pv-sec" aria-labelledby="s-pv" hidden>
+      <h2 class="sec-title" id="s-pv">Preview</h2>
+      <div class="group"><div class="row col noring">
+        <div class="bubble">
+          <div class="msg"><div class="tag">Sponsored</div><div class="who" id="pv-who"></div><div id="pv-text"></div></div>
+          <div class="cta" id="pv-cta">Join channel</div>
+        </div>
+      </div></div>
+    </section>
+
+    <section class="sec" aria-labelledby="s-pl">
+      <h2 class="sec-title" id="s-pl">How long to run it</h2>
+      <div class="group" id="plans" role="radiogroup" aria-labelledby="s-pl"></div>
+      <p class="note">Paid in Telegram Stars. Every promotion is reviewed first, and you get your Stars back if it isn't approved.</p>
+      <p class="note err" id="e-conn" hidden>Payments aren't connected yet. Set API_URL in this page once your bot server is running.</p>
+    </section>
+  </form>
+
+  <section class="sec" aria-labelledby="s-c">
+    <h2 class="sec-title" id="s-c">Your promotions</h2>
+    <div class="group" id="camps"></div>
+  </section>
+</div>
+
+<div class="main"><button type="button" id="create">Pay and submit</button></div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script>
+(function () {
+  /* Address of your bot server (see bot_server.py), for example 'https://ads.example.com'. */
+  var API_URL = '';
+  /* Prices in Telegram Stars. Keep these the same as PLANS in bot_server.py: the server decides the real price. */
+  var PLANS = [
+    { id: 'starter',  days: 3,  stars: 100 },
+    { id: 'standard', days: 7,  stars: 200 },
+    { id: 'extended', days: 14, stars: 350 }
+  ];
+  var state = { kind: 'channel', plan: 'standard', campaigns: [], busy: false };
+  var STAR = '★';
+  var NAME_RE = /^[A-Za-z][A-Za-z0-9_]{4,31}$/;
+
+  function $(id) { return document.getElementById(id); }
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function planById(id) { return PLANS.filter(function (p) { return p.id === id; })[0]; }
+  function cleanHandle(v) { return v.trim().replace(/^https?:\/\/t\.me\//i, '').replace(/^@/, '').replace(/[\/?].*$/, ''); }
+
+  /* Telegram: theme, name and the signed launch data the server checks. */
+  var tg = window.Telegram && window.Telegram.WebApp;
+  var hp = new URLSearchParams(location.hash.slice(1));
+  function applyTheme(p) {
+    if (!p) return;
+    var map = { '--page': p.secondary_bg_color || p.bg_color, '--section': p.section_bg_color || p.bg_color, '--text': p.text_color,
+      '--hint': p.hint_color, '--link': p.link_color, '--button': p.button_color, '--button-text': p.button_text_color,
+      '--sep': p.section_separator_color, '--bad': p.destructive_text_color };
+    var st = document.documentElement.style;
+    Object.keys(map).forEach(function (k) { if (map[k]) st.setProperty(k, map[k]); });
+    var bg = (map['--page'] || '').replace('#', '');
+    if (bg.length === 6) {
+      var lum = (parseInt(bg.slice(0, 2), 16) * 299 + parseInt(bg.slice(2, 4), 16) * 587 + parseInt(bg.slice(4, 6), 16) * 114) / 1000;
+      st.colorScheme = lum < 128 ? 'dark' : 'light';
+    }
+  }
+  var initData = '';
+  try {
+    if (tg) { tg.ready(); tg.expand(); }
+    applyTheme((tg && tg.themeParams) || (hp.get('tgWebAppThemeParams') && JSON.parse(hp.get('tgWebAppThemeParams'))));
+    initData = (tg && tg.initData) || hp.get('tgWebAppData') || '';
+    var name = tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.first_name;
+    if (!name && hp.get('tgWebAppData')) { var u = new URLSearchParams(hp.get('tgWebAppData')).get('user'); if (u) name = JSON.parse(u).first_name; }
+    if (name) $('lead').textContent = 'Hi ' + name + ', promote your Telegram channel or bot.';
+  } catch (e) {}
+
+  var toastTimer;
+  function toast(msg) { var el = $('toast'); el.textContent = msg; el.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(function () { el.hidden = true; }, 3200); }
+
+  /* Server calls */
+  function api(path, body) {
+    if (!API_URL) return Promise.reject(new Error('Payments aren’t connected yet.'));
+    if (!initData) return Promise.reject(new Error('Open this page from Telegram.'));
+    return fetch(API_URL.replace(/\/$/, '') + path, {
+      method: body ? 'POST' : 'GET',
+      headers: { 'Authorization': 'tma ' + initData, 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (d) {
+        if (!r.ok) throw new Error(d.detail && typeof d.detail === 'string' ? d.detail : 'Something went wrong. Try again.');
+        return d;
+      });
+    });
+  }
+  function refresh() {
+    if (!API_URL || !initData) { renderCamps(); return Promise.resolve(); }
+    return api('/api/campaigns').then(function (list) { state.campaigns = list; renderCamps(); }).catch(function () { renderCamps(); });
+  }
+  function pay(link) {
+    if (!tg || !tg.openInvoice) { toast('Open this page inside Telegram to pay.'); return; }
+    tg.openInvoice(link, function (status) {
+      if (status === 'paid') toast('Paid. Your promotion is in review.');
+      else if (status === 'cancelled') toast('Payment cancelled. You can pay later from Your promotions.');
+      else if (status === 'failed') toast('Payment failed. Try again.');
+      refresh();
+    });
+  }
+
+  /* Form */
+  function renderPlans() {
+    $('plans').innerHTML = PLANS.map(function (p) {
+      var on = p.id === state.plan;
+      return '<button type="button" class="row plan" role="radio" aria-checked="' + on + '" data-p="' + p.id + '"><span class="l"><span class="chk">' + (on ? '✓' : '') + '</span><span class="k">' + p.days + ' days</span></span><span class="price">' + p.stars + ' ' + STAR + '</span></button>';
+    }).join('');
+  }
+  function updateForm() {
+    var text = $('f-text').value.trim(), handle = cleanHandle($('f-handle').value);
+    $('text-count').textContent = $('f-text').value.length;
+    $('create').textContent = 'Pay ' + planById(state.plan).stars + ' ' + STAR + ' and submit';
+    $('l-handle').textContent = state.kind === 'bot' ? 'Bot' : 'Channel';
+    $('f-handle').placeholder = state.kind === 'bot' ? 'your_bot' : 'channel_name';
+    $('n-handle').textContent = state.kind === 'bot' ? 'Enter the bot\u2019s username. It ends in \u201cbot\u201d.' : 'Only public channels can be promoted. Enter the channel\u2019s public username, without the link.';
+    $('pv-sec').hidden = !text && !handle;
+    $('pv-who').textContent = handle ? '@' + handle : (state.kind === 'bot' ? 'Your bot' : 'Your channel');
+    $('pv-text').textContent = text;
+    $('pv-cta').textContent = state.kind === 'bot' ? 'Start bot' : 'Join channel';
+  }
+  ['f-text', 'f-handle'].forEach(function (id) { $(id).addEventListener('input', updateForm); });
+  $('kind').addEventListener('click', function (e) {
+    var b = e.target.closest('[data-k]'); if (!b) return;
+    state.kind = b.dataset.k;
+    document.querySelectorAll('#kind button').forEach(function (x) { x.setAttribute('aria-checked', x === b); });
+    updateForm();
+  });
+  $('plans').addEventListener('click', function (e) {
+    var b = e.target.closest('[data-p]'); if (!b) return;
+    state.plan = b.dataset.p; renderPlans(); updateForm();
+  });
+
+  var LABEL = { awaiting_payment: 'Awaiting payment', in_review: 'In review', live: 'Live', rejected: 'Refunded' };
+  function renderCamps() {
+    var c = state.campaigns;
+    $('e-conn').hidden = !!API_URL;
+    $('camps').innerHTML = c.length ? c.map(function (x) {
+      return '<div class="row"><div class="camp"><div class="nm">' + esc(x.name) + '</div><div class="meta"><span class="st-' + esc(x.status) + '">' + esc(LABEL[x.status] || x.status) + '</span> · ' +
+        (x.kind === 'bot' ? 'Bot' : 'Channel') + ' · ' + x.days + ' days · ' + x.stars + ' ' + STAR + '</div></div>' +
+        (x.status === 'awaiting_payment' ? '<button type="button" class="act" data-id="' + x.id + '">Pay</button>' : '') + '</div>';
+    }).join('') : '<div class="empty">' + (API_URL ? 'Nothing yet. Add your channel or bot above.' : 'Your promotions will appear here once the page is connected to your bot server.') + '</div>';
+  }
+  $('camps').addEventListener('click', function (e) {
+    var b = e.target.closest('[data-id]'); if (!b) return;
+    api('/api/campaigns/' + b.dataset.id + '/invoice', {}).then(function (d) { pay(d.invoice_link); }).catch(function (err) { toast(err.message); });
+  });
+
+  function show(id, msg) { var el = $(id); if (msg) { el.textContent = msg; el.hidden = false; } else el.hidden = true; return !!msg; }
+  $('create').addEventListener('click', function () {
+    if (state.busy) return;
+    var handle = cleanHandle($('f-handle').value), text = $('f-text').value.trim();
+    var herr = !NAME_RE.test(handle) ? 'Enter a valid username: 5 to 32 letters, numbers or underscores.'
+      : (state.kind === 'bot' && !/bot$/i.test(handle) ? 'A bot username must end in “bot”.' : '');
+    var badHandle = show('e-handle', herr);
+    var badText = show('e-text', text ? '' : 'Add a short description.');
+    if (badHandle || badText) { (badHandle ? $('f-handle') : $('f-text')).focus(); return; }
+    state.busy = true; $('create').disabled = true;
+    api('/api/campaigns', { plan: state.plan, kind: state.kind, handle: handle, text: text, category: $('f-cat').value, lang: $('f-lang').value })
+      .then(function (d) {
+        $('form').reset(); updateForm();
+        refresh();
+        pay(d.invoice_link);
+      })
+      .catch(function (err) { toast(err.message); })
+      .then(function () { state.busy = false; $('create').disabled = false; });
+  });
+
+  renderPlans(); updateForm(); renderCamps(); refresh();
+})();
+</script>
