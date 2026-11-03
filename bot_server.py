@@ -94,7 +94,7 @@ db.execute(
 )
 # Columns added after the first release. Existing databases get them here.
 _have = {r["name"] for r in db.execute("PRAGMA table_info(campaigns)")}
-for col, typ in (("title", "TEXT"), ("post_id", "INTEGER"), ("live_until", "INTEGER")):
+for col, typ in (("title", "TEXT"), ("post_id", "INTEGER"), ("live_until", "INTEGER"), ("refunded", "INTEGER")):
     if col not in _have:
         db.execute(f"ALTER TABLE campaigns ADD COLUMN {col} {typ}")
 db.commit()
@@ -325,6 +325,44 @@ async def new_invoice(cid: int, authorization: str | None = Header(default=None)
     return {"id": cid, "invoice_link": await make_invoice(cid, c["plan"], c["handle"])}
 
 
+@app.post("/api/campaigns/{cid}/cancel")
+async def cancel_campaign(cid: int, authorization: str | None = Header(default=None)):
+    """The buyer withdraws a promotion: unpaid ones are dropped, ones in review are refunded,
+    live ones are taken down (no refund: they've already run)."""
+    uid = user_id_from(authorization)
+    c = get_campaign(cid)
+    if not c or c["user_id"] != uid:
+        raise HTTPException(404, "Promotion not found.")
+    status = c["status"]
+    if status not in ("awaiting_payment", "in_review", "live"):
+        raise HTTPException(400, "This promotion has already finished.")
+    # Claim it first so an Approve or Reject pressed at the same moment can't also act on it.
+    cur = db.execute("UPDATE campaigns SET status = 'cancelled' WHERE id = ? AND status = ?", (cid, status))
+    db.commit()
+    if cur.rowcount == 0:
+        raise HTTPException(409, "This promotion just changed. Pull to refresh and try again.")
+    what = ""
+    if status == "in_review" and c["charge_id"]:
+        try:
+            await tg("refundStarPayment", user_id=uid, telegram_payment_charge_id=c["charge_id"])
+        except Exception as e:
+            db.execute("UPDATE campaigns SET status = 'in_review' WHERE id = ?", (cid,))
+            db.commit()
+            note_error(f"refunding cancelled promotion #{cid}", e)
+            raise HTTPException(502, "Couldn't refund your Stars right now, so nothing was cancelled. Try again in a minute.")
+        db.execute("UPDATE campaigns SET refunded = 1 WHERE id = ?", (cid,))
+        db.commit()
+        what = f" {PLANS[c['plan']]['stars']} Stars refunded."
+    elif status == "live":
+        await remove_post(c["post_id"], "This promotion was stopped.")
+        what = " Post removed from the channel."
+    if status != "awaiting_payment":
+        with contextlib.suppress(Exception):
+            await tg("sendMessage", chat_id=ADMIN_ID,
+                     text=f"Promotion #{cid} (@{c['handle']}) was cancelled by the buyer.{what}")
+    return {"id": cid, "status": "cancelled", "refunded": bool(what.strip().endswith("refunded."))}
+
+
 @app.get("/api/campaigns")
 async def list_campaigns(authorization: str | None = Header(default=None)):
     uid = user_id_from(authorization)
@@ -341,6 +379,7 @@ async def list_campaigns(authorization: str | None = Header(default=None)):
             "days": plan["days"],
             "stars": plan["stars"] if r["charge_id"] or r["status"] == "awaiting_payment" else 0,
             "until": r["live_until"],
+            "refunded": bool(r["refunded"]),
             "post_url": f"https://t.me/{PROMO_CHANNEL}/{r['post_id']}" if PROMO_CHANNEL and r["post_id"] and r["status"] == "live" else None,
         })
     return out
@@ -405,6 +444,18 @@ def fmt_date(ts: int) -> str:
     return time.strftime("%-d %b", time.gmtime(ts))
 
 
+async def remove_post(post_id: int | None, ended_text: str = "This promotion has ended."):
+    """Take a promotion's post out of the promo channel."""
+    if not (PROMO_CHANNEL and post_id):
+        return
+    try:
+        await tg("deleteMessage", chat_id="@" + PROMO_CHANNEL, message_id=post_id)
+    except Exception:
+        # Older posts can't always be deleted; replace the text instead.
+        with contextlib.suppress(Exception):
+            await tg("editMessageText", chat_id="@" + PROMO_CHANNEL, message_id=post_id, text=ended_text)
+
+
 async def expire_due():
     """End promotions whose time is up and remove their posts."""
     rows = db.execute(
@@ -412,14 +463,7 @@ async def expire_due():
         (int(time.time()),),
     ).fetchall()
     for c in rows:
-        if PROMO_CHANNEL and c["post_id"]:
-            try:
-                await tg("deleteMessage", chat_id="@" + PROMO_CHANNEL, message_id=c["post_id"])
-            except Exception:
-                # Older posts can't always be deleted; replace the text instead.
-                with contextlib.suppress(Exception):
-                    await tg("editMessageText", chat_id="@" + PROMO_CHANNEL, message_id=c["post_id"],
-                             text="This promotion has ended.")
+        await remove_post(c["post_id"])
         db.execute("UPDATE campaigns SET status = 'ended' WHERE id = ?", (c["id"],))
         db.commit()
         with contextlib.suppress(Exception):
@@ -518,8 +562,13 @@ async def handle(u: dict):
                          text=f"Couldn't post in @{PROMO_CHANNEL}. Is the bot an admin who can post? ({e})"[:200])
                 return
             until = int(time.time()) + PLANS[c["plan"]]["days"] * 86400
-            db.execute("UPDATE campaigns SET status = 'live', post_id = ?, live_until = ? WHERE id = ?",
-                       (post_id, until, c["id"]))
+            cur = db.execute("UPDATE campaigns SET status = 'live', post_id = ?, live_until = ? WHERE id = ? AND status = 'in_review'",
+                             (post_id, until, c["id"]))
+            if cur.rowcount == 0:  # the buyer cancelled it meanwhile
+                db.commit()
+                await remove_post(post_id)
+                await tg("answerCallbackQuery", callback_query_id=cb["id"], text="The buyer cancelled this promotion.", show_alert=True)
+                return
             note = f"Your promotion of @{c['handle']} was approved and is live until {fmt_date(until)}."
             if post_id:
                 note += f"\n\nSee it and share it: https://t.me/{PROMO_CHANNEL}/{post_id}"
@@ -537,7 +586,7 @@ async def handle(u: dict):
             else:
                 note = f"Your promotion of @{c['handle']} wasn't approved."
                 outcome = "Rejected"
-            db.execute("UPDATE campaigns SET status = 'rejected' WHERE id = ?", (c["id"],))
+            db.execute("UPDATE campaigns SET status = 'rejected', refunded = ? WHERE id = ?", (1 if c["charge_id"] else 0, c["id"]))
         db.commit()
         await tg("answerCallbackQuery", callback_query_id=cb["id"], text=outcome)
         # Swap the buttons for the outcome so the message shows what you decided.

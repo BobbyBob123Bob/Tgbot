@@ -95,6 +95,8 @@
   .st-rejected { color: var(--bad); font-weight: 600; }
   .st-in_review { font-weight: 600; }
   .act { border: 0; background: none; color: var(--link); font-weight: 600; font-size: 16px; padding: 8px 0 8px 8px; cursor: pointer; flex: none; }
+  .act.stop { color: var(--bad); }
+  .acts { display: flex; flex: none; }
   .act:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 6px; }
   .empty { padding: 20px 16px; text-align: center; color: var(--hint); }
 
@@ -389,7 +391,7 @@
     state.plan = b.dataset.p; haptic.tap(); renderPlans(); updateForm();
   });
 
-  var LABEL = { awaiting_payment: 'Awaiting payment', in_review: 'In review', live: 'Live', ended: 'Ended', rejected: 'Not approved' };
+  var LABEL = { awaiting_payment: 'Awaiting payment', in_review: 'In review', live: 'Live', ended: 'Ended', rejected: 'Not approved', cancelled: 'Cancelled' };
   function fmtDate(ts) { return new Date(ts * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }); }
   function renderCamps() {
     var c = state.campaigns;
@@ -402,8 +404,12 @@
       var label = LABEL[x.status] || x.status;
       if (x.status === 'live' && x.until) label += ' until ' + fmtDate(x.until);
       if (x.status === 'rejected' && x.stars) label = 'Refunded';
-      var act = x.status === 'awaiting_payment' ? '<button type="button" class="act" data-id="' + x.id + '">Pay</button>'
-        : (x.post_url ? '<button type="button" class="act" data-url="' + esc(x.post_url) + '">View</button>' : '');
+      if (x.status === 'cancelled' && x.refunded) label = 'Cancelled \u00b7 refunded';
+      var act = (x.status === 'awaiting_payment' ? '<button type="button" class="act" data-id="' + x.id + '">Pay</button>' : '')
+        + (x.post_url ? '<button type="button" class="act" data-url="' + esc(x.post_url) + '">View</button>' : '')
+        + (x.status === 'awaiting_payment' || x.status === 'in_review' || x.status === 'live'
+          ? '<button type="button" class="act stop" data-cancel="' + x.id + '">' + (x.status === 'live' ? 'Stop' : 'Cancel') + '</button>' : '');
+      act = act ? '<div class="acts">' + act + '</div>' : '';
       return '<div class="row"><div class="camp"><div class="nm">' + esc(x.title || x.name) + '</div><div class="meta"><span class="st-' + esc(x.status) + '">' + esc(label) + '</span> · ' +
         (x.kind === 'bot' ? 'Bot' : 'Channel') + ' · ' + x.days + ' days' + (x.stars ? ' · ' + x.stars + '\u00a0' + STAR : '') + '</div></div>' + act + '</div>';
     }).join('') : '<div class="empty">' + (API_URL ? 'Nothing yet. Add your channel or bot above.' : 'Your promotions will appear here once the page is connected to your bot server.') + '</div>';
@@ -411,9 +417,29 @@
   $('camps').addEventListener('click', function (e) {
     if (e.target.id === 'retry') { refresh(); return; }
     var u = e.target.closest('[data-url]'); if (u) { openTgLink(u.dataset.url); return; }
+    var k = e.target.closest('[data-cancel]'); if (k) { cancelCamp(+k.dataset.cancel); return; }
     var b = e.target.closest('[data-id]'); if (!b) return;
     api('/api/campaigns/' + b.dataset.id + '/invoice', {}).then(function (d) { pay(d.invoice_link); }).catch(function (err) { haptic.bad(); toast(err.message); });
   });
+
+  function confirmBox(msg, cb) {
+    if (tg && tg.showConfirm && atLeast('6.2')) tg.showConfirm(msg, cb); else cb(window.confirm(msg));
+  }
+  function cancelCamp(id) {
+    var x = state.campaigns.filter(function (c) { return c.id === id; })[0]; if (!x) return;
+    var msg = x.status === 'live'
+      ? 'Stop promoting ' + x.name + '? The post will be removed' + (cfg.channel ? ' from ' + cfg.channel : '') + (x.stars ? '. Stars aren\u2019t refunded once a promotion is live.' : '.')
+      : (x.status === 'in_review' && x.stars ? 'Cancel this promotion? Your ' + x.stars + ' Stars will be refunded.' : 'Cancel this promotion?');
+    haptic.tap();
+    confirmBox(msg, function (ok) {
+      if (!ok) return;
+      api('/api/campaigns/' + id + '/cancel', {}).then(function (d) {
+        haptic.ok();
+        toast(x.status === 'live' ? 'Promotion stopped.' : (d.refunded ? 'Cancelled. Your Stars are on their way back.' : 'Cancelled.'));
+        refresh();
+      }).catch(function (err) { haptic.bad(); toast(err.message); refresh(); });
+    });
+  }
 
   function show(id, msg) { var el = $(id); if (msg) { el.textContent = msg; el.hidden = false; } else el.hidden = true; return !!msg; }
   function submit() {
