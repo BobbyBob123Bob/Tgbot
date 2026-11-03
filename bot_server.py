@@ -40,7 +40,8 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+# Strip spaces, quotes and newlines that sneak in when pasting into a host's settings page.
+BOT_TOKEN = os.environ["BOT_TOKEN"].strip().strip("'\"").strip()
 ADMIN_ID = int(os.environ["ADMIN_ID"])
 # Optional until the page is hosted (deploy step 7). Until it is set, browsers can't call the API.
 ORIGIN = os.environ.get("WEBAPP_ORIGIN", "").strip().rstrip("/")
@@ -75,6 +76,7 @@ db.execute(
 db.commit()
 
 http = httpx.AsyncClient(timeout=40)
+BOT_USERNAME = ""  # filled in at startup from getMe
 
 
 async def tg(method: str, **params):
@@ -97,14 +99,21 @@ def verify_init_data(init_data: str) -> int:
     check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
     secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
     calc = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
-    if not got or not hmac.compare_digest(calc, got):
+    if not got:
+        print("auth rejected: no hash in initData")
+        raise denied
+    if not hmac.compare_digest(calc, got):
+        # Almost always means BOT_TOKEN isn't the token of the bot the Mini App was opened from.
+        print(f"auth rejected: signature mismatch (server token is for @{BOT_USERNAME or '?'})")
         raise denied
     try:
         fresh = time.time() - int(pairs.get("auth_date", "0")) < 86400
         uid = int(json.loads(pairs["user"])["id"])
     except (ValueError, KeyError, TypeError):
+        print("auth rejected: missing auth_date or user")
         raise denied
     if not fresh:
+        print("auth rejected: initData older than 24 hours")
         raise denied
     return uid
 
@@ -155,7 +164,7 @@ app.add_middleware(
 @app.get("/")
 async def health():
     """Open the server's address in a browser to check it's running."""
-    return {"ok": True, "webapp_origin_set": bool(ORIGIN)}
+    return {"ok": True, "bot": "@" + BOT_USERNAME if BOT_USERNAME else "not connected yet", "webapp_origin": ORIGIN or None}
 
 
 @app.post("/api/campaigns")
@@ -309,9 +318,12 @@ async def handle(u: dict):
 
 
 async def poll():
+    global BOT_USERNAME
     # Retry until Telegram answers: if this failed once at startup, the bot would never poll again.
     while True:
         try:
+            BOT_USERNAME = (await tg("getMe"))["username"]
+            print(f"connected as @{BOT_USERNAME}")
             await tg("deleteWebhook")
             break
         except Exception as e:
