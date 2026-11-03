@@ -295,7 +295,7 @@ async def create_campaign(body: CampaignIn, authorization: str | None = Header(d
     if body.kind == "channel":
         info = await check_channel(handle)
         title = info and info["title"]
-    if FREE_MODE:
+    if FREE_MODE and uid != ADMIN_ID:  # the owner can add as many listings as they like
         waiting = db.execute(
             "SELECT COUNT(*) FROM campaigns WHERE user_id = ? AND status = 'in_review'", (uid,)
         ).fetchone()[0]
