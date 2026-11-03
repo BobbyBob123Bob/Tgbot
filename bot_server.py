@@ -354,7 +354,7 @@ async def cancel_campaign(cid: int, authorization: str | None = Header(default=N
         db.commit()
         what = f" {PLANS[c['plan']]['stars']} Stars refunded."
     elif status == "live":
-        await remove_post(c["post_id"], "This promotion was stopped.")
+        await remove_post(c["post_id"], "⏹ This promotion was stopped.")
         what = " Post removed from the channel."
     if status != "awaiting_payment":
         with contextlib.suppress(Exception):
@@ -413,29 +413,77 @@ async def send_for_review(c):
     )
 
 
-def post_text(c) -> str:
+CATEGORY_EMOJI = {
+    "Crypto": "🪙", "Tech": "💻", "News": "📰", "Business": "💼",
+    "Education": "🎓", "Entertainment": "🎬", "Games": "🎮", "Other": "✨",
+}
+
+
+def short_count(n: int) -> str:
+    """1234 -> 1.2K, 56789 -> 56.8K, 1200000 -> 1.2M"""
+    for size, suffix in ((1_000_000, "M"), (1_000, "K")):
+        if n >= size:
+            return f"{n / size:.1f}".rstrip("0").rstrip(".") + suffix
+    return str(n)
+
+
+def hashtag(word: str) -> str:
+    return "#" + re.sub(r"[^0-9a-z_]", "", word.lower())
+
+
+def post_text(c, members: int | None = None) -> str:
+    """The promotion as it appears in the promo channel (Telegram HTML)."""
+    is_bot = c["kind"] == "bot"
     name = html.escape(c["title"] or "@" + c["handle"])
-    tag = "Sponsored" if c["charge_id"] else "Featured"
-    return (
-        f"<b>{name}</b>\n{html.escape(c['text'])}\n\n"
-        f"@{c['handle']} · #{c['category']} · {html.escape(c['lang'])}\n<i>{tag}</i>"
-    )
+    handle = f'<a href="https://t.me/{c["handle"]}">@{c["handle"]}</a>'
+    emoji = CATEGORY_EMOJI.get(c["category"], "✨")
+    facts = [f"{emoji} {html.escape(c['category'])}", "🤖 Bot" if is_bot else "📣 Channel"]
+    if members:
+        facts.append(f"👥 {short_count(members)} subscribers")
+    tags = [hashtag(c["category"])] if c["category"] != "Other" else []
+    if c["lang"] and c["lang"] != "Any":
+        tags.append(hashtag(c["lang"]))
+    tags.append("#bots" if is_bot else "#channels")
+    label = "Sponsored" if c["charge_id"] else "Featured"
+    footer = f"<i>{label}</i>"
+    if BOT_USERNAME:
+        footer += f' · <a href="https://t.me/{BOT_USERNAME}?start=promo">Get your {"bot" if is_bot else "channel"} featured</a>'
+    title_line = f"<b>{name}</b>" if c["title"] else f"<b>{handle}</b>"
+    lines = [
+        title_line,
+        " · ".join(facts),
+        "",
+        f"<blockquote>{html.escape(c['text'])}</blockquote>",
+    ]
+    if c["title"]:
+        lines.append(f"👉 {handle}")
+    lines += ["", " ".join(tags), footer]
+    return "\n".join(lines)
 
 
 async def publish(c) -> int | None:
     """Post an approved promotion in the promo channel. Returns the message id (None if no channel is set)."""
     if not PROMO_CHANNEL:
         return None
+    members = None
+    if c["kind"] == "channel":
+        with contextlib.suppress(Exception):
+            info = await lookup_chat(c["handle"])
+            members = info and info["members"]
+    buttons = [[{
+        "text": "🤖 Start bot" if c["kind"] == "bot" else "➕ Join channel",
+        "url": f"https://t.me/{c['handle']}",
+    }]]
+    if BOT_USERNAME:
+        buttons.append([{"text": "📣 Promote yours", "url": f"https://t.me/{BOT_USERNAME}?start=promo"}])
     msg = await tg(
         "sendMessage",
         chat_id="@" + PROMO_CHANNEL,
-        text=post_text(c),
+        text=post_text(c, members),
         parse_mode="HTML",
-        link_preview_options={"is_disabled": True},
-        reply_markup={"inline_keyboard": [[{
-            "text": "Start bot" if c["kind"] == "bot" else "Join channel",
-            "url": f"https://t.me/{c['handle']}",
-        }]]},
+        # Telegram's own preview card of the promoted channel/bot: its photo, name and bio.
+        link_preview_options={"url": f"https://t.me/{c['handle']}", "prefer_small_media": True},
+        reply_markup={"inline_keyboard": buttons},
     )
     return msg["message_id"]
 
@@ -444,7 +492,7 @@ def fmt_date(ts: int) -> str:
     return time.strftime("%-d %b", time.gmtime(ts))
 
 
-async def remove_post(post_id: int | None, ended_text: str = "This promotion has ended."):
+async def remove_post(post_id: int | None, ended_text: str = "⏱ This promotion has ended."):
     """Take a promotion's post out of the promo channel."""
     if not (PROMO_CHANNEL and post_id):
         return
