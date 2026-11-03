@@ -79,6 +79,11 @@
   .plan .l { display: flex; align-items: center; gap: 10px; }
   .plan .chk { width: 18px; color: var(--link); font-weight: 700; }
   .plan .price { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .plan .was { color: var(--hint); font-weight: 400; text-decoration: line-through; margin-right: 6px; }
+  .sale { margin: 0 0 8px; padding: 10px 16px; border-radius: 12px; background: var(--section); font-weight: 600; color: var(--warn); }
+  .apply { border: 0; background: none; color: var(--link); font-weight: 600; cursor: pointer; padding: 4px 0 4px 8px; flex: none; }
+  .apply:disabled { color: var(--hint); cursor: default; }
+  .apply:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 6px; }
   .plan:focus-visible { outline: 2px solid var(--link); outline-offset: -2px; }
 
   .bubble { background: var(--page); border-radius: 14px 14px 14px 4px; overflow: hidden; }
@@ -183,7 +188,16 @@
 
     <section class="sec" aria-labelledby="s-pl">
       <h2 class="sec-title" id="s-pl">How long to run it</h2>
+      <p class="sale" id="sale" hidden></p>
       <div class="group" id="plans" role="radiogroup" aria-labelledby="s-pl"></div>
+      <div class="group" id="code-box" style="margin-top:12px">
+        <label class="row" for="f-code">
+          <span class="k">Promo code</span>
+          <input class="in" id="f-code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Optional" style="text-align:right;text-transform:uppercase" aria-describedby="n-code">
+          <button type="button" class="apply" id="apply-code">Apply</button>
+        </label>
+      </div>
+      <p class="note" id="n-code" aria-live="polite" hidden></p>
       <p class="note" id="n-plans">Paid in Telegram Stars. Every promotion is reviewed first, and you get your Stars back if it isn't approved.</p>
       <p class="note err" id="e-conn" hidden>Payments aren't connected yet. Set API_URL in this page once your bot server is running.</p>
     </section>
@@ -208,8 +222,8 @@
     { id: 'standard', days: 7,  stars: 200 },
     { id: 'extended', days: 14, stars: 350 }
   ];
-  var cfg = { free: false, channel: null, channel_members: null };
-  var state = { kind: 'channel', plan: 'standard', campaigns: [], loadFailed: false, busy: false, look: null };
+  var cfg = { free: false, channel: null, channel_members: null, sale: 0, sale_until: null };
+  var state = { kind: 'channel', plan: 'standard', campaigns: [], loadFailed: false, busy: false, look: null, code: null };
   var STAR = '★';
   var NAME_RE = /^[A-Za-z][A-Za-z0-9_]{4,31}$/;
 
@@ -302,7 +316,7 @@
       if (c.plans && c.plans.length) PLANS = c.plans;
       if (!PLANS.some(function (p) { return p.id === state.plan; })) state.plan = PLANS[Math.min(1, PLANS.length - 1)].id;
       cfg = c;
-      renderConfig(); renderPlans(); updateForm(); renderCamps();
+      renderConfig(); renderSale(); renderPlans(); updateForm(); renderCamps();
     }).catch(function () {});
   }
   function refresh() {
@@ -360,16 +374,35 @@
   }
 
   /* Form */
+  /* What a plan costs right now: a promo code's price, else the sale price, else full price. */
+  function priceOf(p) {
+    if (state.code && state.code.prices && state.code.prices[p.id] != null) return state.code.prices[p.id];
+    return p.price != null ? p.price : p.stars;
+  }
+  function priceHtml(p) {
+    if (cfg.free) return 'Free';
+    var now = priceOf(p);
+    var shown = now === 0 ? 'Free' : now + '\u00a0' + STAR;
+    return now < p.stars ? '<span class="was">' + p.stars + '\u00a0' + STAR + '</span>' + shown : shown;
+  }
+  function renderSale() {
+    $('code-box').hidden = cfg.free;
+    if (cfg.free) { $('n-code').hidden = true; }
+    var el = $('sale');
+    el.hidden = !(cfg.sale > 0) || cfg.free;
+    if (!el.hidden) el.textContent = '\ud83d\udd25 ' + cfg.sale + '% off everything' + (cfg.sale_until ? ' until ' + fmtDate(cfg.sale_until) : '');
+  }
   function renderPlans() {
     $('plans').innerHTML = PLANS.map(function (p) {
       var on = p.id === state.plan;
-      return '<button type="button" class="row plan" role="radio" aria-checked="' + on + '" data-p="' + esc(p.id) + '"><span class="l"><span class="chk">' + (on ? '✓' : '') + '</span><span class="k">' + p.days + ' days</span></span><span class="price">' + (cfg.free ? 'Free' : p.stars + '\u00a0' + STAR) + '</span></button>';
+      return '<button type="button" class="row plan" role="radio" aria-checked="' + on + '" data-p="' + esc(p.id) + '"><span class="l"><span class="chk">' + (on ? '✓' : '') + '</span><span class="k">' + p.days + ' days</span></span><span class="price">' + priceHtml(p) + '</span></button>';
     }).join('');
   }
   function updateForm() {
     var text = $('f-text').value.trim(), handle = cleanHandle($('f-handle').value);
     $('text-count').textContent = $('f-text').value.length;
-    if (!state.busy) setButton(cfg.free ? 'Submit for review' : 'Pay ' + planById(state.plan).stars + '\u00a0' + STAR + ' and submit');
+    var cost = priceOf(planById(state.plan));
+    if (!state.busy) setButton(cfg.free || cost === 0 ? 'Submit for review' : 'Pay ' + cost + '\u00a0' + STAR + ' and submit');
     $('l-handle').textContent = state.kind === 'bot' ? 'Bot' : 'Channel';
     $('f-handle').placeholder = state.kind === 'bot' ? 'your_bot' : 'channel_name';
     $('n-handle').textContent = state.kind === 'bot' ? 'Enter the bot’s username. It ends in “bot”.' : 'Only public channels can be promoted. Enter the channel’s public username or t.me link.';
@@ -390,6 +423,26 @@
     var b = e.target.closest('[data-p]'); if (!b) return;
     state.plan = b.dataset.p; haptic.tap(); renderPlans(); updateForm();
   });
+
+  /* Promo code */
+  function codeNote(msg, cls) { var el = $('n-code'); el.textContent = msg; el.className = 'note' + (cls ? ' ' + cls : ''); el.hidden = !msg; }
+  $('apply-code').addEventListener('click', function () {
+    var code = $('f-code').value.trim().toUpperCase();
+    if (state.code && state.code.code === code) return;
+    if (!code) { state.code = null; codeNote(''); renderPlans(); updateForm(); return; }
+    $('apply-code').disabled = true; codeNote('Checking ' + code + '\u2026');
+    api('/api/code?code=' + encodeURIComponent(code)).then(function (d) {
+      state.code = d; haptic.ok();
+      codeNote('\u2713 ' + d.code + ': ' + (d.percent >= 100 ? 'free promotion' : d.percent + '% off'), 'ok');
+      renderPlans(); updateForm();
+    }).catch(function (err) {
+      state.code = null; haptic.bad(); codeNote(err.message, 'err'); renderPlans(); updateForm();
+    }).then(function () { $('apply-code').disabled = false; });
+  });
+  $('f-code').addEventListener('input', function () {
+    if (state.code && $('f-code').value.trim().toUpperCase() !== state.code.code) { state.code = null; codeNote(''); renderPlans(); updateForm(); }
+  });
+  $('f-code').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); $('apply-code').click(); } });
 
   var LABEL = { awaiting_payment: 'Awaiting payment', in_review: 'In review', live: 'Live', ended: 'Ended', rejected: 'Not approved', cancelled: 'Cancelled' };
   function fmtDate(ts) { return new Date(ts * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }); }
@@ -450,10 +503,12 @@
     var badHandle = show('e-handle', herr);
     var badText = show('e-text', text ? '' : 'Add a short description.');
     if (badHandle || badText) { haptic.bad(); (badHandle ? $('f-handle') : $('f-text')).focus(); return; }
-    state.busy = true; setButton(cfg.free ? 'Submitting…' : 'Opening payment…', true);
-    api('/api/campaigns', { plan: state.plan, kind: state.kind, handle: handle, text: text, category: $('f-cat').value, lang: $('f-lang').value })
+    var free = cfg.free || priceOf(planById(state.plan)) === 0;
+    state.busy = true; setButton(free ? 'Submitting…' : 'Opening payment…', true);
+    api('/api/campaigns', { plan: state.plan, kind: state.kind, handle: handle, text: text, category: $('f-cat').value, lang: $('f-lang').value, code: state.code ? state.code.code : null })
       .then(function (d) {
         $('form').reset(); state.look = null; $('n-look').hidden = true;
+        state.code = null; $('n-code').hidden = true; renderPlans();
         refresh();
         if (d.invoice_link) pay(d.invoice_link);
         else { haptic.ok(); toast('Submitted. You’ll get a message once it’s reviewed.'); }
@@ -462,6 +517,6 @@
       .then(function () { state.busy = false; updateForm(); });
   }
 
-  renderConfig(); renderPlans(); updateForm(); renderCamps(); refresh(); loadConfig();
+  renderConfig(); renderSale(); renderPlans(); updateForm(); renderCamps(); refresh(); loadConfig();
 })();
 </script>

@@ -94,9 +94,15 @@ db.execute(
 )
 # Columns added after the first release. Existing databases get them here.
 _have = {r["name"] for r in db.execute("PRAGMA table_info(campaigns)")}
-for col, typ in (("title", "TEXT"), ("post_id", "INTEGER"), ("live_until", "INTEGER"), ("refunded", "INTEGER")):
+for col, typ in (("title", "TEXT"), ("post_id", "INTEGER"), ("live_until", "INTEGER"), ("refunded", "INTEGER"),
+                 ("price", "INTEGER"), ("code", "TEXT")):
     if col not in _have:
         db.execute(f"ALTER TABLE campaigns ADD COLUMN {col} {typ}")
+# Promo codes and settings (the current sale) that you manage from your bot chat.
+db.execute("""CREATE TABLE IF NOT EXISTS codes (
+    code TEXT PRIMARY KEY, percent INTEGER NOT NULL, max_uses INTEGER, uses INTEGER NOT NULL DEFAULT 0,
+    expires INTEGER, created INTEGER NOT NULL)""")
+db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
 db.commit()
 
 http = httpx.AsyncClient(timeout=40)
@@ -120,6 +126,73 @@ async def tg(method: str, **params):
 
 def get_campaign(cid: int):
     return db.execute("SELECT * FROM campaigns WHERE id = ?", (cid,)).fetchone()
+
+
+# ---------- Discounts: promo codes and sales ----------
+
+CODE_RE = re.compile(r"^[A-Z0-9_-]{3,20}$")
+
+
+def setting(key: str, default: str | None = None) -> str | None:
+    row = db.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def set_setting(key: str, value) -> None:
+    db.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+               (key, None if value is None else str(value)))
+    db.commit()
+
+
+def current_sale() -> tuple[int, int | None]:
+    """(percent off everything, ends at) — (0, None) when there's no sale."""
+    pct = int(setting("sale_percent") or 0)
+    until = setting("sale_until")
+    until = int(until) if until else None
+    if pct and until and until <= time.time():
+        set_setting("sale_percent", 0)
+        set_setting("sale_until", None)
+        return 0, None
+    return pct, until
+
+
+def find_code(code: str):
+    """The promo code's row if it exists and can still be used, else None."""
+    row = db.execute("SELECT * FROM codes WHERE code = ?", (code.strip().upper(),)).fetchone()
+    if not row:
+        return None
+    if row["expires"] and row["expires"] <= time.time():
+        return None
+    if row["max_uses"] and row["uses"] >= row["max_uses"]:
+        return None
+    return row
+
+
+def discounted(stars: int, pct: int) -> int:
+    """Price after pct% off. 100% off is free (0); anything else costs at least 1 Star."""
+    if pct >= 100:
+        return 0
+    return max(1, int(stars * (100 - pct) / 100 + 0.5))
+
+
+def quote(plan_id: str, code_row=None) -> tuple[int, int, str | None]:
+    """(price, percent off, code that gave it). Sale and code don't stack: the bigger one wins."""
+    sale, _ = current_sale()
+    code_pct = code_row["percent"] if code_row else 0
+    if code_pct > sale:
+        return discounted(PLANS[plan_id]["stars"], code_pct), code_pct, code_row["code"]
+    return discounted(PLANS[plan_id]["stars"], sale), sale, None
+
+
+def price_of(c) -> int:
+    """What this promotion costs (older ones, from before discounts, have no stored price)."""
+    return c["price"] if c["price"] is not None else PLANS[c["plan"]]["stars"]
+
+
+def use_code(code: str | None) -> None:
+    if code:
+        db.execute("UPDATE codes SET uses = uses + 1 WHERE code = ?", (code,))
+        db.commit()
 
 
 def verify_init_data(init_data: str) -> int:
@@ -198,7 +271,7 @@ async def check_channel(handle: str) -> dict | None:
 
 # ---------- Payments ----------
 
-async def make_invoice(cid: int, plan_id: str, handle: str) -> str:
+async def make_invoice(cid: int, plan_id: str, handle: str, price: int) -> str:
     plan = PLANS[plan_id]
     return await tg(
         "createInvoiceLink",
@@ -206,7 +279,7 @@ async def make_invoice(cid: int, plan_id: str, handle: str) -> str:
         description=f"Promote @{handle} to Telegram users for {plan['days']} days.",
         payload=str(cid),
         currency="XTR",  # Telegram Stars. No provider token is needed.
-        prices=[{"label": f"{plan['days']} days", "amount": plan["stars"]}],
+        prices=[{"label": f"{plan['days']} days", "amount": price}],
     )
 
 
@@ -217,6 +290,7 @@ class CampaignIn(BaseModel):
     text: str = Field(min_length=1, max_length=200)
     category: str = "Other"
     lang: str = Field(default="Any", max_length=20)
+    code: str | None = Field(default=None, max_length=30)
 
 
 @contextlib.asynccontextmanager
@@ -260,8 +334,11 @@ async def config():
         with contextlib.suppress(Exception):
             info = await lookup_chat(PROMO_CHANNEL)
             members = info and info["members"]
+    sale, sale_until = current_sale()
     return {
-        "plans": [{"id": k, **v} for k, v in PLANS.items()],
+        "plans": [{"id": k, **v, "price": discounted(v["stars"], sale)} for k, v in PLANS.items()],
+        "sale": sale,
+        "sale_until": sale_until,
         "free": FREE_MODE,
         "channel": "@" + PROMO_CHANNEL if PROMO_CHANNEL else None,
         "channel_members": members,
@@ -279,6 +356,20 @@ async def lookup(handle: str, authorization: str | None = Header(default=None)):
     if info is None:
         raise HTTPException(503, "Couldn't check this channel right now.")
     return {"title": info["title"], "members": info["members"]}
+
+
+@app.get("/api/code")
+async def check_code(code: str, authorization: str | None = Header(default=None)):
+    """The page calls this when the buyer taps Apply on a promo code."""
+    user_id_from(authorization)
+    row = find_code(code)
+    if not row:
+        raise HTTPException(404, "That code isn't valid or has expired.")
+    sale, _ = current_sale()
+    if row["percent"] <= sale:
+        raise HTTPException(400, f"There's already a {sale}% sale on, which beats this code.")
+    return {"code": row["code"], "percent": row["percent"],
+            "prices": {k: discounted(v["stars"], row["percent"]) for k, v in PLANS.items()}}
 
 
 @app.post("/api/campaigns")
@@ -301,19 +392,29 @@ async def create_campaign(body: CampaignIn, authorization: str | None = Header(d
         ).fetchone()[0]
         if waiting >= MAX_PENDING_FREE:
             raise HTTPException(429, "You already have promotions waiting for review. Try again once they're reviewed.")
+    price, code = 0, None
+    if not FREE_MODE:
+        code_row = None
+        if body.code and body.code.strip():
+            code_row = find_code(body.code)
+            if not code_row:
+                raise HTTPException(400, "That code isn't valid or has expired.")
+        price, _, code = quote(body.plan, code_row)
+    free = FREE_MODE or price == 0
     category = body.category if body.category in CATEGORIES else "Other"
     cur = db.execute(
-        "INSERT INTO campaigns (user_id, kind, handle, title, text, category, lang, plan, status, created) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO campaigns (user_id, kind, handle, title, text, category, lang, plan, status, price, code, created) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (uid, body.kind, handle, title, body.text, category, body.lang, body.plan,
-         "in_review" if FREE_MODE else "awaiting_payment", int(time.time())),
+         "in_review" if free else "awaiting_payment", price, code, int(time.time())),
     )
     db.commit()
     cid = cur.lastrowid
-    if FREE_MODE:
+    if free:
+        use_code(code)
         await send_for_review(get_campaign(cid))
         return {"id": cid, "invoice_link": None, "free": True}
-    return {"id": cid, "invoice_link": await make_invoice(cid, body.plan, handle), "free": False}
+    return {"id": cid, "invoice_link": await make_invoice(cid, body.plan, handle, price), "free": False}
 
 
 @app.post("/api/campaigns/{cid}/invoice")
@@ -322,7 +423,7 @@ async def new_invoice(cid: int, authorization: str | None = Header(default=None)
     c = get_campaign(cid)
     if not c or c["user_id"] != uid or c["status"] != "awaiting_payment":
         raise HTTPException(404, "This campaign can't be paid.")
-    return {"id": cid, "invoice_link": await make_invoice(cid, c["plan"], c["handle"])}
+    return {"id": cid, "invoice_link": await make_invoice(cid, c["plan"], c["handle"], price_of(c))}
 
 
 @app.post("/api/campaigns/{cid}/cancel")
@@ -352,7 +453,7 @@ async def cancel_campaign(cid: int, authorization: str | None = Header(default=N
             raise HTTPException(502, "Couldn't refund your Stars right now, so nothing was cancelled. Try again in a minute.")
         db.execute("UPDATE campaigns SET refunded = 1 WHERE id = ?", (cid,))
         db.commit()
-        what = f" {PLANS[c['plan']]['stars']} Stars refunded."
+        what = f" {price_of(c)} Stars refunded."
     elif status == "live":
         await remove_post(c["post_id"], "⏹ This promotion was stopped.")
         what = " Post removed from the channel."
@@ -377,7 +478,9 @@ async def list_campaigns(authorization: str | None = Header(default=None)):
             "title": r["title"],
             "status": r["status"],
             "days": plan["days"],
-            "stars": plan["stars"] if r["charge_id"] or r["status"] == "awaiting_payment" else 0,
+            "stars": price_of(r) if r["charge_id"] or r["status"] == "awaiting_payment" else 0,
+            "full_price": plan["stars"],
+            "code": r["code"],
             "until": r["live_until"],
             "refunded": bool(r["refunded"]),
             "post_url": f"https://t.me/{PROMO_CHANNEL}/{r['post_id']}" if PROMO_CHANNEL and r["post_id"] and r["status"] == "live" else None,
@@ -396,7 +499,10 @@ async def send_for_review(c):
             looked = "Couldn't look this channel up. Check it yourself."
     else:
         looked = "Bot: not looked up."
-    paid = f"Paid {PLANS[c['plan']]['stars']} Stars" if c["charge_id"] else "Free listing"
+    if c["charge_id"]:
+        paid = f"Paid {price_of(c)} Stars" + (f" (code {c['code']})" if c["code"] else "")
+    else:
+        paid = f"Free with code {c['code']}" if c["code"] else "Free listing"
     await tg(
         "sendMessage",
         chat_id=ADMIN_ID,
@@ -528,12 +634,105 @@ async def expire_loop():
         await asyncio.sleep(300)
 
 
+ADMIN_HELP = """Your discount commands:
+
+/newcode CODE PERCENT [USES] [DAYS]
+  e.g. /newcode LAUNCH50 50 100 7
+  50% off, first 100 uses, for 7 days. Leave out USES or DAYS (or use 0) for no limit.
+  100% makes the promotion free.
+/codes  list your codes
+/delcode CODE  delete a code
+/sale PERCENT [DAYS]  e.g. /sale 20 3 = 20% off everything for 3 days
+/sale 0  end the sale
+
+A sale and a code don't stack: buyers get whichever is bigger."""
+
+
+def admin_command(text: str) -> str | None:
+    """Handle /newcode, /codes, /delcode, /sale and /admin. Returns the reply, or None if it isn't one."""
+    parts = text.split()
+    if not parts:
+        return None
+    cmd, args = parts[0].lower().split("@")[0], parts[1:]
+
+    def nums(vals, names):
+        out = []
+        for v, name in zip(vals, names):
+            if not v.isdigit():
+                raise ValueError(f"{name} must be a whole number, not \"{v}\".")
+            out.append(int(v))
+        return out
+
+    try:
+        if cmd == "/admin":
+            return ADMIN_HELP
+        if cmd == "/newcode":
+            if len(args) < 2:
+                return "Usage: /newcode CODE PERCENT [USES] [DAYS]\ne.g. /newcode LAUNCH50 50 100 7"
+            code = args[0].upper()
+            if not CODE_RE.match(code):
+                return "Codes are 3 to 20 letters, numbers, - or _."
+            pct, uses, days = (nums(args[1:4], ["PERCENT", "USES", "DAYS"]) + [0, 0])[:3]
+            if not 1 <= pct <= 100:
+                return "PERCENT must be between 1 and 100."
+            expires = int(time.time()) + days * 86400 if days else None
+            existed = db.execute("SELECT 1 FROM codes WHERE code = ?", (code,)).fetchone()
+            db.execute("INSERT OR REPLACE INTO codes (code, percent, max_uses, uses, expires, created) VALUES (?, ?, ?, 0, ?, ?)",
+                       (code, pct, uses or None, expires, int(time.time())))
+            db.commit()
+            what = "free" if pct == 100 else f"{pct}% off"
+            limits = [f"{uses} uses" if uses else "unlimited uses", f"until {fmt_date(expires)}" if expires else "no expiry"]
+            return f"{'Updated' if existed else 'Created'} code {code}: {what}, {', '.join(limits)}."
+        if cmd == "/codes":
+            rows = db.execute("SELECT * FROM codes ORDER BY created DESC").fetchall()
+            if not rows:
+                return "No codes yet. Make one with /newcode CODE PERCENT"
+            lines = []
+            for r in rows:
+                used = f"{r['uses']}/{r['max_uses']} used" if r["max_uses"] else f"{r['uses']} used"
+                state = ""
+                if r["expires"] and r["expires"] <= time.time():
+                    state = " · expired"
+                elif r["max_uses"] and r["uses"] >= r["max_uses"]:
+                    state = " · used up"
+                elif r["expires"]:
+                    state = f" · until {fmt_date(r['expires'])}"
+                lines.append(f"{r['code']} · {r['percent']}% · {used}{state}")
+            sale, until = current_sale()
+            if sale:
+                lines.append(f"\nSale: {sale}% off everything" + (f" until {fmt_date(until)}" if until else ""))
+            return "\n".join(lines)
+        if cmd == "/delcode":
+            if not args:
+                return "Usage: /delcode CODE"
+            n = db.execute("DELETE FROM codes WHERE code = ?", (args[0].upper(),)).rowcount
+            db.commit()
+            return f"Deleted {args[0].upper()}." if n else f"There's no code {args[0].upper()}."
+        if cmd == "/sale":
+            if not args:
+                sale, until = current_sale()
+                now = f"Now: {sale}% off" + (f" until {fmt_date(until)}" if until else "") if sale else "No sale on."
+                return f"{now}\nUsage: /sale PERCENT [DAYS], or /sale 0 to end it."
+            pct, days = (nums(args[:2], ["PERCENT", "DAYS"]) + [0])[:2]
+            if not 0 <= pct <= 99:
+                return "PERCENT must be between 0 and 99. (For free listings, use FREE_MODE or a 100% code.)"
+            until = int(time.time()) + days * 86400 if pct and days else None
+            set_setting("sale_percent", pct)
+            set_setting("sale_until", until)
+            if not pct:
+                return "Sale ended. Prices are back to normal."
+            return f"Sale on: {pct}% off everything" + (f" until {fmt_date(until)}." if until else " until you end it with /sale 0.")
+    except ValueError as e:
+        return str(e)
+    return None
+
+
 async def handle(u: dict):
     # 1. Telegram asks if the payment may go ahead. We have 10 seconds to answer.
     q = u.get("pre_checkout_query")
     if q:
         c = get_campaign(int(q["invoice_payload"]))
-        ok = bool(c) and c["status"] == "awaiting_payment" and q["total_amount"] == PLANS[c["plan"]]["stars"]
+        ok = bool(c) and c["status"] == "awaiting_payment" and q["total_amount"] == price_of(c)
         extra = {} if ok else {"error_message": "This campaign can no longer be paid."}
         await tg("answerPreCheckoutQuery", pre_checkout_query_id=q["id"], ok=ok, **extra)
         return
@@ -560,9 +759,17 @@ async def handle(u: dict):
                 ),
             )
             return
+        use_code(c["code"])
         await tg("sendMessage", chat_id=c["user_id"], text="Payment received. Your promotion is in review.")
         await send_for_review(c)
         return
+
+    # Your own commands (only you, in your private chat with the bot): promo codes and sales.
+    if m and m.get("from", {}).get("id") == ADMIN_ID and m.get("chat", {}).get("type") == "private":
+        reply = admin_command(m.get("text") or "")
+        if reply:
+            await tg("sendMessage", chat_id=m["chat"]["id"], text=reply)
+            return
 
     # /app (or /app@thisbot): a button that opens the Mini App.
     cmd = (m.get("text") or "").split()[0].lower() if m and m.get("text") else ""
@@ -674,6 +881,17 @@ async def setup_profile():
         {"command": "start", "description": "Welcome and how it works"},
         {"command": "app", "description": "Open Advertise Pro"},
     ])
+    # Extra commands only you see in your chat with the bot.
+    with contextlib.suppress(Exception):
+        await tg("setMyCommands", scope={"type": "chat", "chat_id": ADMIN_ID}, commands=[
+            {"command": "start", "description": "Welcome and how it works"},
+            {"command": "app", "description": "Open Advertise Pro"},
+            {"command": "admin", "description": "Your discount commands"},
+            {"command": "newcode", "description": "Make a promo code"},
+            {"command": "codes", "description": "List promo codes"},
+            {"command": "delcode", "description": "Delete a promo code"},
+            {"command": "sale", "description": "Start or end a sale"},
+        ])
     if ORIGIN:
         await tg("setChatMenuButton", menu_button={"type": "web_app", "text": "Open", "web_app": {"url": ORIGIN + "/"}})
     description, short = profile_texts()

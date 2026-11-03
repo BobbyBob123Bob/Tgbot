@@ -44,6 +44,22 @@ to and which of the settings above are on.
 **Test first with `TEST_PRICES=1`** on Railway. Pay once and approve, then pay again and reject to
 confirm the refund arrives. Then remove `TEST_PRICES`.
 
+## Discounts
+
+Send these to the bot from your own account (`ADMIN_ID`). Nobody else can use them.
+
+| Command | What it does |
+| --- | --- |
+| `/newcode LAUNCH50 50 100 7` | Promo code: 50% off, first 100 uses, for 7 days. Uses and days are optional. `100`% makes it free. |
+| `/codes` | List codes, how often each was used, and the current sale |
+| `/delcode LAUNCH50` | Delete a code |
+| `/sale 20 3` | 20% off everything for 3 days (days optional) |
+| `/sale 0` | End the sale |
+| `/admin` | Show these commands |
+
+Buyers type codes in the Mini App. A sale and a code don't stack: the bigger discount wins.
+A code's use is counted when the buyer pays (or submits, if it makes the promotion free).
+
 ## Not built yet
 
 - Checking that the buyer actually runs the channel or bot. Check this yourself before approving.
