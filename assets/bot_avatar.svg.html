@@ -1,0 +1,64 @@
+<!doctype html><html><head><style>html,body{margin:0;background:transparent}</style></head><body>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="38%" r="75%">
+      <stop offset="0" stop-color="#2b2a7a"/><stop offset="0.55" stop-color="#17134a"/><stop offset="1" stop-color="#0a0b24"/>
+    </radialGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#3fd8ff" stop-opacity="0.45"/><stop offset="1" stop-color="#3fd8ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="cone" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7ef0ff"/><stop offset="0.5" stop-color="#2aa8ff"/><stop offset="1" stop-color="#6b4dff"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#9fe9ff"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffe680"/><stop offset="1" stop-color="#ffab1f"/>
+    </linearGradient>
+    <linearGradient id="txt" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#8fe8ff"/>
+    </linearGradient>
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="14"/></filter>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#000" flood-opacity="0.45"/></filter>
+    <path id="star" d="M0,-1 L0.2245,-0.309 L0.951,-0.309 L0.363,0.118 L0.588,0.809 L0,0.382 L-0.588,0.809 L-0.363,0.118 L-0.951,-0.309 L-0.2245,-0.309 Z"/>
+  </defs>
+
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <!-- faint backdrop dots -->
+  <g fill="#ffffff" opacity="0.35">
+    <circle cx="210" cy="250" r="3"/><circle cx="820" cy="210" r="2.5"/><circle cx="860" cy="560" r="3"/>
+    <circle cx="170" cy="610" r="2.5"/><circle cx="300" cy="150" r="2"/><circle cx="720" cy="130" r="2"/>
+  </g>
+  <circle cx="512" cy="512" r="380" fill="url(#glow)"/>
+  <!-- glowing ring, inside the circular crop -->
+  <circle cx="512" cy="512" r="452" fill="none" stroke="#3fd8ff" stroke-width="10" opacity="0.55" filter="url(#soft)"/>
+  <circle cx="512" cy="512" r="452" fill="none" stroke="#7ef0ff" stroke-width="4" opacity="0.8"/>
+
+  <g transform="translate(-150 30) scale(1.15)">
+  <!-- megaphone -->
+  <g transform="translate(512 430) rotate(-14) translate(-512 -430)" filter="url(#shadow)">
+    <!-- handle -->
+    <path d="M430 500 L506 532 L490 640 Q486 662 464 659 L438 655 Q416 651 420 630 Z" fill="#5a3fd6"/><path d="M446 560 L488 572" stroke="#8f7bff" stroke-width="8" stroke-linecap="round"/><path d="M440 600 L482 610" stroke="#8f7bff" stroke-width="8" stroke-linecap="round"/>
+    <!-- back cap -->
+    <rect x="300" y="376" width="96" height="140" rx="30" fill="#6b4dff"/>
+    <rect x="300" y="376" width="96" height="140" rx="30" fill="none" stroke="#a593ff" stroke-width="5" opacity="0.7"/>
+    <!-- cone -->
+    <path d="M382 382 L640 268 Q662 260 662 284 L662 608 Q662 632 640 624 L382 510 Z" fill="url(#cone)"/>
+    <path d="M400 396 L630 296 L630 330 L400 420 Z" fill="#ffffff" opacity="0.28"/>
+    <!-- bell rim -->
+    <ellipse cx="660" cy="446" rx="38" ry="182" fill="url(#rim)"/>
+    <ellipse cx="664" cy="446" rx="22" ry="150" fill="#1b5fd6" opacity="0.55"/>
+  </g>
+
+  <!-- sound waves -->
+  <g fill="none" stroke="#7ef0ff" stroke-linecap="round" stroke-width="22">
+    <path d="M748 300 Q808 380 778 470" opacity="0.95"/>
+    <path d="M816 250 Q900 370 852 500" opacity="0.6"/>
+  </g>
+  <!-- stars -->
+  <use href="#star" fill="url(#gold)" transform="translate(770 190) scale(48)"/>
+  <use href="#star" fill="url(#gold)" transform="translate(880 330) scale(28) rotate(12)"/>
+  <use href="#star" fill="url(#gold)" transform="translate(690 140) scale(20) rotate(-10)"/>
+</g>
+</svg></body></html>

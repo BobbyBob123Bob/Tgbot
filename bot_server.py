@@ -552,6 +552,38 @@ async def handle(u: dict):
             await tg("sendMessage", chat_id=c["user_id"], text=note)
 
 
+def profile_texts() -> tuple[str, str]:
+    """(description, short description) shown on the bot's profile and in an empty chat."""
+    where = f"posted in @{PROMO_CHANNEL}" if PROMO_CHANNEL else "promoted"
+    pay = "Listing is free for now" if FREE_MODE else "Pay with Telegram Stars"
+    refund = "" if FREE_MODE else "\n• Not approved? Your Stars are refunded automatically"
+    description = (
+        "Get your Telegram channel or bot in front of new people.\n\n"
+        "• Pick how long to run it: 3, 7 or 14 days\n"
+        f"• {pay}\n"
+        f"• Every promotion is reviewed, then {where}{refund}\n\n"
+        "Tap Start, then Open Advertise Pro."
+    )
+    short = "Promote your Telegram channel or bot." + (f" Live promotions: @{PROMO_CHANNEL}" if PROMO_CHANNEL else "")
+    return description[:512], short[:120]
+
+
+async def setup_profile():
+    """Commands menu, the Open button by the message box, and descriptions if they're still empty.
+    Never overwrites a description you've written yourself in BotFather."""
+    await tg("setMyCommands", commands=[
+        {"command": "start", "description": "Welcome and how it works"},
+        {"command": "app", "description": "Open Advertise Pro"},
+    ])
+    if ORIGIN:
+        await tg("setChatMenuButton", menu_button={"type": "web_app", "text": "Open", "web_app": {"url": ORIGIN + "/"}})
+    description, short = profile_texts()
+    if not (await tg("getMyDescription")).get("description"):
+        await tg("setMyDescription", description=description)
+    if not (await tg("getMyShortDescription")).get("short_description"):
+        await tg("setMyShortDescription", short_description=short)
+
+
 async def poll():
     global BOT_USERNAME
     # Retry until Telegram answers: if this failed once at startup, the bot would never poll again.
@@ -564,6 +596,10 @@ async def poll():
         except Exception as e:
             note_error("startup", e)
             await asyncio.sleep(3)
+    try:
+        await setup_profile()
+    except Exception as e:
+        note_error("setting up the bot profile", e)  # cosmetic; never stops the bot
     offset = 0
     while True:
         try:
