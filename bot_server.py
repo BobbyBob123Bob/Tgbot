@@ -1,24 +1,31 @@
 """Advertise Pro bot server: Telegram Stars payments + the API the Mini App talks to.
-People pay to promote a Telegram channel or bot.
+People pay to promote a Telegram channel or bot. You review each one; approved promotions are
+posted in your promo channel and removed when their time is up.
 
-Setup
-  pip install fastapi uvicorn httpx
-  export BOT_TOKEN=123456:ABC...            # from BotFather
-  export ADMIN_ID=111222333                 # your own Telegram user id (you approve ads)
-  export WEBAPP_ORIGIN=https://your-page-host.example   # where webapp/index.html is hosted (optional
-                                            # at first; the page can't call the API until it's set)
-  export DB_PATH=/data/adpro.db             # optional, default adpro.db
+Settings (environment variables)
+  BOT_TOKEN       required  from BotFather
+  ADMIN_ID        required  your own Telegram user id (you approve promotions)
+  WEBAPP_ORIGIN   optional  where webapp/index.html is hosted, e.g. https://adprotg.netlify.app
+                            (the page can't call the API until it's set)
+  DB_PATH         optional  SQLite file, default adpro.db (use /data/adpro.db on a volume)
+  PROMO_CHANNEL   optional  your promo channel, e.g. @adpro_promos. The bot must be an admin there
+                            with "Post messages" and "Delete messages". Without it, approving only
+                            marks a promotion live.
+  FREE_MODE       optional  1 = listings are free (no payment, still reviewed). For launch.
+  TEST_PRICES     optional  1 = every plan costs 1 Star. For testing payments and refunds.
+
+Run
+  pip install -r requirements.txt
   uvicorn bot_server:app --host 0.0.0.0 --port 8000
-  Put HTTPS in front of port 8000 (Caddy, nginx, or a host that provides it), then set API_URL
-  in adpro_webapp.html to that address.
 
 Flow
-  1. The page POSTs the promotion (channel or bot, @username, description, plan) to /api/campaigns.
-     The server saves it as "awaiting_payment" and returns a Stars invoice link.
-  2. The page opens the invoice inside Telegram (WebApp.openInvoice).
-  3. Telegram sends the bot a pre_checkout_query (we approve) and then a successful_payment.
-  4. The promotion becomes "in_review" and you get a message with Approve / Reject buttons.
-     Reject refunds the Stars automatically.
+  1. The page POSTs the promotion to /api/campaigns. Paid: saved as "awaiting_payment" and a Stars
+     invoice link is returned. Free mode: goes straight to "in_review".
+  2. Paid: the page opens the invoice; Telegram sends pre_checkout_query (we approve) and then
+     successful_payment, and the promotion becomes "in_review".
+  3. You get a message with Approve / Reject. Approve posts it in PROMO_CHANNEL and makes it "live".
+     Reject refunds the Stars (if it was paid).
+  4. When the plan's days are up, the post is removed and the promotion becomes "ended".
 
 Note: this server does not check that the buyer owns the channel or bot. Look at each request
 before you approve it, and never approve a username the buyer doesn't run.
@@ -27,6 +34,7 @@ import asyncio
 import contextlib
 import hashlib
 import hmac
+import html
 import json
 import os
 import re
@@ -40,21 +48,32 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+
+def env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 # Strip spaces, quotes and newlines that sneak in when pasting into a host's settings page.
 BOT_TOKEN = os.environ["BOT_TOKEN"].strip().strip("'\"").strip()
 ADMIN_ID = int(os.environ["ADMIN_ID"])
 # Optional until the page is hosted (deploy step 7). Until it is set, browsers can't call the API.
 ORIGIN = os.environ.get("WEBAPP_ORIGIN", "").strip().rstrip("/")
+PROMO_CHANNEL = os.environ.get("PROMO_CHANNEL", "").strip().replace("https://t.me/", "").lstrip("@")
+FREE_MODE = env_flag("FREE_MODE")
+TEST_PRICES = env_flag("TEST_PRICES")
 API = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 
-# Prices are in Telegram Stars. Keep this in sync with PLANS in adpro_webapp.html.
+# Prices are in Telegram Stars. The page reads them from /api/config, so this is the only place to change them.
 PLANS = {
     "starter": {"days": 3, "stars": 100},
     "standard": {"days": 7, "stars": 200},
     "extended": {"days": 14, "stars": 350},
 }
+if TEST_PRICES:
+    PLANS = {k: {**v, "stars": 1} for k, v in PLANS.items()}
 CATEGORIES = ["Crypto", "Tech", "News", "Business", "Education", "Entertainment", "Games", "Other"]
 USERNAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
+MAX_PENDING_FREE = 3  # free mode: how many promotions one person can have waiting for review
 
 db = sqlite3.connect(os.environ.get("DB_PATH", "adpro.db"), check_same_thread=False)
 db.row_factory = sqlite3.Row
@@ -73,6 +92,11 @@ db.execute(
         created INTEGER NOT NULL
     )"""
 )
+# Columns added after the first release. Existing databases get them here.
+_have = {r["name"] for r in db.execute("PRAGMA table_info(campaigns)")}
+for col, typ in (("title", "TEXT"), ("post_id", "INTEGER"), ("live_until", "INTEGER")):
+    if col not in _have:
+        db.execute(f"ALTER TABLE campaigns ADD COLUMN {col} {typ}")
 db.commit()
 
 http = httpx.AsyncClient(timeout=40)
@@ -124,6 +148,49 @@ def user_id_from(authorization: str | None) -> int:
     return verify_init_data(authorization[4:])
 
 
+# ---------- Channel look-ups (cached so typing in the page doesn't hammer Telegram) ----------
+
+_lookups: dict[str, tuple[float, dict | None]] = {}
+
+
+async def lookup_chat(handle: str) -> dict | None:
+    """{"type", "title", "members"} for a public chat, or None if it doesn't exist.
+    Raises RuntimeError if Telegram couldn't be asked (so callers can let it through)."""
+    key = handle.lower()
+    hit = _lookups.get(key)
+    if hit and time.time() - hit[0] < 600:
+        return hit[1]
+    try:
+        chat = await tg("getChat", chat_id="@" + handle)
+    except RuntimeError as e:
+        if "not found" in str(e).lower():
+            _lookups[key] = (time.time(), None)
+            return None
+        raise
+    members = None
+    with contextlib.suppress(Exception):
+        members = await tg("getChatMemberCount", chat_id="@" + handle)
+    info = {"type": chat.get("type"), "title": chat.get("title") or chat.get("first_name") or "", "members": members}
+    _lookups[key] = (time.time(), info)
+    return info
+
+
+async def check_channel(handle: str) -> dict | None:
+    """Raise a 400 the page can show if this isn't a public channel. Returns its info when known."""
+    try:
+        info = await lookup_chat(handle)
+    except Exception:
+        return None  # Telegram didn't answer; don't block the buyer, you'll check it in review.
+    if info is None:
+        raise HTTPException(400, f"No public channel @{handle} found. Check the username.")
+    if info["type"] != "channel":
+        kind = {"supergroup": "a group", "group": "a group", "private": "a user or bot"}.get(info["type"], "not a channel")
+        raise HTTPException(400, f"@{handle} is {kind}, not a channel.")
+    return info
+
+
+# ---------- Payments ----------
+
 async def make_invoice(cid: int, plan_id: str, handle: str) -> str:
     plan = PLANS[plan_id]
     return await tg(
@@ -147,9 +214,10 @@ class CampaignIn(BaseModel):
 
 @contextlib.asynccontextmanager
 async def lifespan(_):
-    task = asyncio.create_task(poll())
+    tasks = [asyncio.create_task(poll()), asyncio.create_task(expire_loop())]
     yield
-    task.cancel()
+    for t in tasks:
+        t.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -164,7 +232,43 @@ app.add_middleware(
 @app.get("/")
 async def health():
     """Open the server's address in a browser to check it's running."""
-    return {"ok": True, "bot": "@" + BOT_USERNAME if BOT_USERNAME else "not connected yet", "webapp_origin": ORIGIN or None}
+    return {
+        "ok": True,
+        "bot": "@" + BOT_USERNAME if BOT_USERNAME else "not connected yet",
+        "webapp_origin": ORIGIN or None,
+        "promo_channel": "@" + PROMO_CHANNEL if PROMO_CHANNEL else None,
+        "free_mode": FREE_MODE,
+        "test_prices": TEST_PRICES,
+    }
+
+
+@app.get("/api/config")
+async def config():
+    """What the page shows: plans, prices, free mode and the promo channel."""
+    members = None
+    if PROMO_CHANNEL:
+        with contextlib.suppress(Exception):
+            info = await lookup_chat(PROMO_CHANNEL)
+            members = info and info["members"]
+    return {
+        "plans": [{"id": k, **v} for k, v in PLANS.items()],
+        "free": FREE_MODE,
+        "channel": "@" + PROMO_CHANNEL if PROMO_CHANNEL else None,
+        "channel_members": members,
+    }
+
+
+@app.get("/api/lookup")
+async def lookup(handle: str, authorization: str | None = Header(default=None)):
+    """The page calls this while the buyer types a channel username."""
+    user_id_from(authorization)
+    handle = handle.strip().lstrip("@")
+    if not USERNAME.match(handle):
+        raise HTTPException(400, "Enter a valid username: 5 to 32 letters, numbers or underscores.")
+    info = await check_channel(handle)
+    if info is None:
+        raise HTTPException(503, "Couldn't check this channel right now.")
+    return {"title": info["title"], "members": info["members"]}
 
 
 @app.post("/api/campaigns")
@@ -177,14 +281,29 @@ async def create_campaign(body: CampaignIn, authorization: str | None = Header(d
         raise HTTPException(400, "Enter a valid username: 5 to 32 letters, numbers or underscores.")
     if body.kind == "bot" and not handle.lower().endswith("bot"):
         raise HTTPException(400, "A bot username must end in \"bot\".")
+    title = None
+    if body.kind == "channel":
+        info = await check_channel(handle)
+        title = info and info["title"]
+    if FREE_MODE:
+        waiting = db.execute(
+            "SELECT COUNT(*) FROM campaigns WHERE user_id = ? AND status = 'in_review'", (uid,)
+        ).fetchone()[0]
+        if waiting >= MAX_PENDING_FREE:
+            raise HTTPException(429, "You already have promotions waiting for review. Try again once they're reviewed.")
     category = body.category if body.category in CATEGORIES else "Other"
     cur = db.execute(
-        "INSERT INTO campaigns (user_id, kind, handle, text, category, lang, plan, status, created) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, 'awaiting_payment', ?)",
-        (uid, body.kind, handle, body.text, category, body.lang, body.plan, int(time.time())),
+        "INSERT INTO campaigns (user_id, kind, handle, title, text, category, lang, plan, status, created) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (uid, body.kind, handle, title, body.text, category, body.lang, body.plan,
+         "in_review" if FREE_MODE else "awaiting_payment", int(time.time())),
     )
     db.commit()
-    return {"id": cur.lastrowid, "invoice_link": await make_invoice(cur.lastrowid, body.plan, handle)}
+    cid = cur.lastrowid
+    if FREE_MODE:
+        await send_for_review(get_campaign(cid))
+        return {"id": cid, "invoice_link": None, "free": True}
+    return {"id": cid, "invoice_link": await make_invoice(cid, body.plan, handle), "free": False}
 
 
 @app.post("/api/campaigns/{cid}/invoice")
@@ -200,27 +319,111 @@ async def new_invoice(cid: int, authorization: str | None = Header(default=None)
 async def list_campaigns(authorization: str | None = Header(default=None)):
     uid = user_id_from(authorization)
     rows = db.execute("SELECT * FROM campaigns WHERE user_id = ? ORDER BY id DESC LIMIT 50", (uid,)).fetchall()
-    return [
-        {
+    out = []
+    for r in rows:
+        plan = PLANS.get(r["plan"], {"days": 0, "stars": 0})
+        out.append({
             "id": r["id"],
             "kind": r["kind"],
             "name": "@" + r["handle"],
+            "title": r["title"],
             "status": r["status"],
-            "days": PLANS[r["plan"]]["days"],
-            "stars": PLANS[r["plan"]]["stars"],
-        }
-        for r in rows
-    ]
+            "days": plan["days"],
+            "stars": plan["stars"] if r["charge_id"] or r["status"] == "awaiting_payment" else 0,
+            "until": r["live_until"],
+            "post_url": f"https://t.me/{PROMO_CHANNEL}/{r['post_id']}" if PROMO_CHANNEL and r["post_id"] and r["status"] == "live" else None,
+        })
+    return out
 
 
-async def channel_info(handle: str) -> str:
-    """Best-effort look-up to help you review a channel. A failure never blocks anything."""
-    try:
-        chat = await tg("getChat", chat_id="@" + handle)
-        members = await tg("getChatMemberCount", chat_id="@" + handle)
-        return f"Looked up: {chat.get('type')} \"{chat.get('title')}\", {members} members"
-    except Exception:
-        return "Couldn't look this channel up. Check it yourself."
+# ---------- Review, posting and expiry ----------
+
+async def send_for_review(c):
+    if c["kind"] == "channel":
+        try:
+            info = await lookup_chat(c["handle"])
+            looked = f"Looked up: {info['type']} \"{info['title']}\", {info['members']} members" if info else "Channel not found!"
+        except Exception:
+            looked = "Couldn't look this channel up. Check it yourself."
+    else:
+        looked = "Bot: not looked up."
+    paid = f"Paid {PLANS[c['plan']]['stars']} Stars" if c["charge_id"] else "Free listing"
+    await tg(
+        "sendMessage",
+        chat_id=ADMIN_ID,
+        text=(
+            f"New {c['kind']} promotion #{c['id']}: @{c['handle']}\n"
+            f"{PLANS[c['plan']]['days']} days · {paid} · {c['category']} · {c['lang']}\n"
+            f"{looked}\n\n{c['text']}\n\nhttps://t.me/{c['handle']}"
+        ),
+        link_preview_options={"is_disabled": True},
+        reply_markup={"inline_keyboard": [[
+            {"text": "Approve", "callback_data": f"ok:{c['id']}"},
+            {"text": "Reject and refund" if c["charge_id"] else "Reject", "callback_data": f"no:{c['id']}"},
+        ]]},
+    )
+
+
+def post_text(c) -> str:
+    name = html.escape(c["title"] or "@" + c["handle"])
+    tag = "Sponsored" if c["charge_id"] else "Featured"
+    return (
+        f"<b>{name}</b>\n{html.escape(c['text'])}\n\n"
+        f"@{c['handle']} · #{c['category']} · {html.escape(c['lang'])}\n<i>{tag}</i>"
+    )
+
+
+async def publish(c) -> int | None:
+    """Post an approved promotion in the promo channel. Returns the message id (None if no channel is set)."""
+    if not PROMO_CHANNEL:
+        return None
+    msg = await tg(
+        "sendMessage",
+        chat_id="@" + PROMO_CHANNEL,
+        text=post_text(c),
+        parse_mode="HTML",
+        link_preview_options={"is_disabled": True},
+        reply_markup={"inline_keyboard": [[{
+            "text": "Start bot" if c["kind"] == "bot" else "Join channel",
+            "url": f"https://t.me/{c['handle']}",
+        }]]},
+    )
+    return msg["message_id"]
+
+
+def fmt_date(ts: int) -> str:
+    return time.strftime("%-d %b", time.gmtime(ts))
+
+
+async def expire_due():
+    """End promotions whose time is up and remove their posts."""
+    rows = db.execute(
+        "SELECT * FROM campaigns WHERE status = 'live' AND live_until IS NOT NULL AND live_until <= ?",
+        (int(time.time()),),
+    ).fetchall()
+    for c in rows:
+        if PROMO_CHANNEL and c["post_id"]:
+            try:
+                await tg("deleteMessage", chat_id="@" + PROMO_CHANNEL, message_id=c["post_id"])
+            except Exception:
+                # Older posts can't always be deleted; replace the text instead.
+                with contextlib.suppress(Exception):
+                    await tg("editMessageText", chat_id="@" + PROMO_CHANNEL, message_id=c["post_id"],
+                             text="This promotion has ended.")
+        db.execute("UPDATE campaigns SET status = 'ended' WHERE id = ?", (c["id"],))
+        db.commit()
+        with contextlib.suppress(Exception):
+            await tg("sendMessage", chat_id=c["user_id"],
+                     text=f"Your promotion of @{c['handle']} has ended. Thanks for using Advertise Pro!")
+
+
+async def expire_loop():
+    while True:
+        try:
+            await expire_due()
+        except Exception as e:
+            print("expire error:", e)
+        await asyncio.sleep(300)
 
 
 async def handle(u: dict):
@@ -255,29 +458,21 @@ async def handle(u: dict):
                 ),
             )
             return
-        info = await channel_info(c["handle"]) if c["kind"] == "channel" else "Bot: not looked up."
         await tg("sendMessage", chat_id=c["user_id"], text="Payment received. Your promotion is in review.")
-        await tg(
-            "sendMessage",
-            chat_id=ADMIN_ID,
-            text=(
-                f"New {c['kind']} promotion #{cid}: @{c['handle']}\n"
-                f"{PLANS[c['plan']]['days']} days, {c['category']}, {c['lang']}\n"
-                f"{info}\n\n{c['text']}\n\nhttps://t.me/{c['handle']}"
-            ),
-            reply_markup={"inline_keyboard": [[
-                {"text": "Approve", "callback_data": f"ok:{cid}"},
-                {"text": "Reject and refund", "callback_data": f"no:{cid}"},
-            ]]},
-        )
+        await send_for_review(c)
         return
 
-    # Someone opens the bot chat. Point them at the Mini App.
+    # Someone opens the bot chat. Point them at the Mini App and the promo channel.
     if m and m.get("chat", {}).get("type") == "private" and (m.get("text") or "").startswith("/start"):
-        text = "Promote your public Telegram channel or bot. Pay in Stars; every promotion is reviewed first."
-        extra = {}
+        how = "Listing is free for now" if FREE_MODE else "Pay in Stars"
+        text = f"Promote your public Telegram channel or bot. {how}; every promotion is reviewed first."
+        buttons = []
         if ORIGIN:
-            extra["reply_markup"] = {"inline_keyboard": [[{"text": "Open Advertise Pro", "web_app": {"url": ORIGIN + "/"}}]]}
+            buttons.append([{"text": "Open Advertise Pro", "web_app": {"url": ORIGIN + "/"}}])
+        if PROMO_CHANNEL:
+            text += f"\n\nSee what's being promoted in @{PROMO_CHANNEL}."
+            buttons.append([{"text": f"Follow @{PROMO_CHANNEL}", "url": f"https://t.me/{PROMO_CHANNEL}"}])
+        extra = {"reply_markup": {"inline_keyboard": buttons}} if buttons else {}
         await tg("sendMessage", chat_id=m["chat"]["id"], text=text, **extra)
         return
 
@@ -290,19 +485,34 @@ async def handle(u: dict):
             await tg("answerCallbackQuery", callback_query_id=cb["id"], text="Already handled.")
             return
         if action == "ok":
-            db.execute("UPDATE campaigns SET status = 'live' WHERE id = ?", (c["id"],))
-            note = f"Your promotion of @{c['handle']} was approved and is live."
+            try:
+                post_id = await publish(c)
+            except Exception as e:
+                # Leave it in review so you can fix the channel and press Approve again.
+                await tg("answerCallbackQuery", callback_query_id=cb["id"], show_alert=True,
+                         text=f"Couldn't post in @{PROMO_CHANNEL}. Is the bot an admin who can post? ({e})"[:200])
+                return
+            until = int(time.time()) + PLANS[c["plan"]]["days"] * 86400
+            db.execute("UPDATE campaigns SET status = 'live', post_id = ?, live_until = ? WHERE id = ?",
+                       (post_id, until, c["id"]))
+            note = f"Your promotion of @{c['handle']} was approved and is live until {fmt_date(until)}."
+            if post_id:
+                note += f"\n\nSee it and share it: https://t.me/{PROMO_CHANNEL}/{post_id}"
             outcome = "Approved"
         else:
-            try:
-                await tg("refundStarPayment", user_id=c["user_id"], telegram_payment_charge_id=c["charge_id"])
-            except Exception as e:
-                # Leave it in review so you can try again.
-                await tg("answerCallbackQuery", callback_query_id=cb["id"], text=f"Refund failed: {e}"[:200], show_alert=True)
-                return
+            if c["charge_id"]:
+                try:
+                    await tg("refundStarPayment", user_id=c["user_id"], telegram_payment_charge_id=c["charge_id"])
+                except Exception as e:
+                    # Leave it in review so you can try again.
+                    await tg("answerCallbackQuery", callback_query_id=cb["id"], text=f"Refund failed: {e}"[:200], show_alert=True)
+                    return
+                note = f"Your promotion of @{c['handle']} wasn't approved. Your Stars have been refunded."
+                outcome = "Rejected and refunded"
+            else:
+                note = f"Your promotion of @{c['handle']} wasn't approved."
+                outcome = "Rejected"
             db.execute("UPDATE campaigns SET status = 'rejected' WHERE id = ?", (c["id"],))
-            note = f"Your promotion of @{c['handle']} wasn't approved. Your Stars have been refunded."
-            outcome = "Rejected and refunded"
         db.commit()
         await tg("answerCallbackQuery", callback_query_id=cb["id"], text=outcome)
         # Swap the buttons for the outcome so the message shows what you decided.
@@ -327,7 +537,7 @@ async def poll():
             await tg("deleteWebhook")
             break
         except Exception as e:
-            print("deleteWebhook error:", e)
+            print("startup error:", e)
             await asyncio.sleep(3)
     offset = 0
     while True:

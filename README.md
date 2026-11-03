@@ -19,8 +19,14 @@ and rejecting one refunds the Stars automatically.
 | `ADMIN_ID` | yes | Your Telegram user id (from @userinfobot). You get the Approve / Reject messages. |
 | `WEBAPP_ORIGIN` | after step 6 | Address the page is hosted at, no trailing slash. The page can't reach the API until it's set. |
 | `DB_PATH` | recommended | `/data/adpro.db` on a volume, so promotions survive redeploys. |
+| `PROMO_CHANNEL` | optional | Your promo channel, e.g. `@adpro_promos`. Approved promotions are posted there and removed when their days run out. The bot must be an admin with **Post messages** and **Delete messages**. |
+| `FREE_MODE` | optional | `1` = listings are free (still reviewed). Use it to launch and grow the channel. |
+| `TEST_PRICES` | optional | `1` = every plan costs 1 Star, for testing payments and refunds. Remove it afterwards. |
 
-Open the server's address in a browser to check it's running: it answers `{"ok": true, ...}`.
+Prices live only in `PLANS` in `bot_server.py`; the page loads them from the server.
+
+Open the server's address in a browser to check it's running. It shows which bot the token belongs
+to and which of the settings above are on.
 
 ## Deploy
 
@@ -35,12 +41,11 @@ Open the server's address in a browser to check it's running: it answers `{"ok":
 7. Set `WEBAPP_ORIGIN` on Railway to that address (no trailing slash). Railway redeploys.
 8. In BotFather, `/newapp` (or `/editapp`) → set the page address and upload `assets/banner.png`.
 
-**Test first with every plan set to 1 Star**, in both `PLANS` in `bot_server.py` and `PLANS` in
-`webapp/index.html`. Pay once and approve, then pay again and reject to confirm the refund arrives.
-Then put the real prices back.
+**Test first with `TEST_PRICES=1`** on Railway. Pay once and approve, then pay again and reject to
+confirm the refund arrives. Then remove `TEST_PRICES`.
 
 ## Not built yet
 
-- Delivering promotions to users (approving only marks a promotion live).
 - Checking that the buyer actually runs the channel or bot. Check this yourself before approving.
-- Real stats (views, clicks) and private channels.
+- A "Discover" feed inside the Mini App, click tracking and stats.
+- Private channels.

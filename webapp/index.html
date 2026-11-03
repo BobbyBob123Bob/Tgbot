@@ -106,11 +106,24 @@
   .main button:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 
   .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(84px + env(safe-area-inset-bottom, 0px)); background: var(--text); color: var(--page); padding: 10px 16px; border-radius: 999px; font-weight: 600; font-size: 14px; z-index: 20; max-width: calc(100% - 32px); text-align: center; }
+  .note.ok { color: var(--good); }
+  .st-ended { color: var(--hint); font-weight: 600; }
+  .follow { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; margin-top: 16px; padding: 12px 16px; min-height: 48px;
+    background: var(--section); border: 0; border-radius: 12px; cursor: pointer; text-align: left; color: var(--link); font-weight: 600; }
+  .follow small { display: block; color: var(--hint); font-weight: 400; font-size: 13px; margin-top: 2px; }
+  .follow:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+  .chev { color: var(--hint); font-size: 20px; line-height: 1; }
+  .retry { border: 0; background: none; color: var(--link); font-weight: 600; cursor: pointer; padding: 8px; }
+  /* Inside Telegram the native bottom button is used instead of ours. */
+  body.tgmb .main { display: none; }
+  body.tgmb .app { padding-bottom: 32px; }
+  body.tgmb .toast { bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
 </style>
 
 <div class="app">
   <h1>Advertise Pro</h1>
   <p class="lead" id="lead">Promote your Telegram channel or bot.</p>
+  <button type="button" class="follow" id="follow" hidden><span><span id="follow-name"></span><small id="follow-sub">See what's being promoted</small></span><span class="chev" aria-hidden="true">›</span></button>
 
   <form id="form" novalidate>
     <section class="sec" aria-labelledby="s-kind">
@@ -130,7 +143,7 @@
           <span class="k" id="l-handle">Channel</span>
           <span style="display:flex;align-items:baseline;gap:2px;flex:1;min-width:0;justify-content:flex-end">
             <span class="at">@</span>
-            <input class="in" id="f-handle" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="username" style="width:auto;flex:1;text-align:left" aria-describedby="e-handle">
+            <input class="in" id="f-handle" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="username" style="width:auto;flex:1;text-align:left" aria-describedby="n-look e-handle">
           </span>
         </label>
         <div class="row col noring">
@@ -150,6 +163,7 @@
           </select>
         </label>
       </div>
+      <p class="note" id="n-look" aria-live="polite" hidden></p>
       <p class="note" id="n-handle"></p>
       <p class="note err" id="e-handle" hidden></p>
       <p class="note err" id="e-text" hidden>Add a short description.</p>
@@ -159,7 +173,7 @@
       <h2 class="sec-title" id="s-pv">Preview</h2>
       <div class="group"><div class="row col noring">
         <div class="bubble">
-          <div class="msg"><div class="tag">Sponsored</div><div class="who" id="pv-who"></div><div id="pv-text"></div></div>
+          <div class="msg"><div class="tag" id="pv-tag">Sponsored</div><div class="who" id="pv-who"></div><div id="pv-text"></div></div>
           <div class="cta" id="pv-cta">Join channel</div>
         </div>
       </div></div>
@@ -168,7 +182,7 @@
     <section class="sec" aria-labelledby="s-pl">
       <h2 class="sec-title" id="s-pl">How long to run it</h2>
       <div class="group" id="plans" role="radiogroup" aria-labelledby="s-pl"></div>
-      <p class="note">Paid in Telegram Stars. Every promotion is reviewed first, and you get your Stars back if it isn't approved.</p>
+      <p class="note" id="n-plans">Paid in Telegram Stars. Every promotion is reviewed first, and you get your Stars back if it isn't approved.</p>
       <p class="note err" id="e-conn" hidden>Payments aren't connected yet. Set API_URL in this page once your bot server is running.</p>
     </section>
   </form>
@@ -184,25 +198,29 @@
 
 <script>
 (function () {
-  /* Address of your bot server (see bot_server.py), for example 'https://ads.example.com'. */
+  /* Address of your bot server (see bot_server.py). */
   var API_URL = 'https://web-production-3d0115.up.railway.app';
-  /* Prices in Telegram Stars. Keep these the same as PLANS in bot_server.py: the server decides the real price. */
+  /* Fallback only: the real plans and prices come from the server (/api/config). */
   var PLANS = [
     { id: 'starter',  days: 3,  stars: 100 },
     { id: 'standard', days: 7,  stars: 200 },
     { id: 'extended', days: 14, stars: 350 }
   ];
-  var state = { kind: 'channel', plan: 'standard', campaigns: [], busy: false };
+  var cfg = { free: false, channel: null, channel_members: null };
+  var state = { kind: 'channel', plan: 'standard', campaigns: [], loadFailed: false, busy: false, look: null };
   var STAR = '★';
   var NAME_RE = /^[A-Za-z][A-Za-z0-9_]{4,31}$/;
 
   function $(id) { return document.getElementById(id); }
   function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
-  function planById(id) { return PLANS.filter(function (p) { return p.id === id; })[0]; }
-  function cleanHandle(v) { return v.trim().replace(/^https?:\/\/t\.me\//i, '').replace(/^@/, '').replace(/[\/?].*$/, ''); }
+  function planById(id) { return PLANS.filter(function (p) { return p.id === id; })[0] || PLANS[0]; }
+  function cleanHandle(v) { return v.trim().replace(/^(https?:\/\/)?(t\.me|telegram\.me)\//i, '').replace(/^@/, '').replace(/[\/?].*$/, ''); }
+  function num(n) { return Number(n).toLocaleString(); }
 
-  /* Telegram: theme, name and the signed launch data the server checks. */
+  /* Telegram: theme, name, haptics, native button and the signed launch data the server checks. */
   var tg = window.Telegram && window.Telegram.WebApp;
+  var inTg = !!(tg && tg.initData);
+  function atLeast(v) { try { return !!(tg && tg.isVersionAtLeast && tg.isVersionAtLeast(v)); } catch (e) { return false; } }
   var hp = new URLSearchParams(location.hash.slice(1));
   function applyTheme(p) {
     if (!p) return;
@@ -225,19 +243,41 @@
     var name = tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.first_name;
     if (!name && hp.get('tgWebAppData')) { var u = new URLSearchParams(hp.get('tgWebAppData')).get('user'); if (u) name = JSON.parse(u).first_name; }
     if (name) $('lead').textContent = 'Hi ' + name + ', promote your Telegram channel or bot.';
+    if (tg && tg.setHeaderColor && atLeast('6.1')) tg.setHeaderColor('secondary_bg_color');
   } catch (e) {}
+
+  var haptic = {
+    tap: function () { try { if (atLeast('6.1')) tg.HapticFeedback.selectionChanged(); } catch (e) {} },
+    ok: function () { try { if (atLeast('6.1')) tg.HapticFeedback.notificationOccurred('success'); } catch (e) {} },
+    bad: function () { try { if (atLeast('6.1')) tg.HapticFeedback.notificationOccurred('error'); } catch (e) {} }
+  };
+
+  /* Bottom button: Telegram's own inside Telegram (nothing on the page can cover it), ours elsewhere. */
+  var useMB = inTg && tg.MainButton && atLeast('6.0');
+  if (useMB) {
+    document.body.classList.add('tgmb');
+    tg.MainButton.onClick(submit);
+  }
+  $('create').addEventListener('click', submit);
+  function setButton(text, busy) {
+    if (useMB) {
+      tg.MainButton.setText(text);
+      tg.MainButton.show();
+      if (busy) { tg.MainButton.showProgress(false); tg.MainButton.disable(); } else { tg.MainButton.hideProgress(); tg.MainButton.enable(); }
+    } else {
+      $('create').textContent = text;
+      $('create').disabled = !!busy;
+    }
+  }
 
   var toastTimer;
   function toast(msg) { var el = $('toast'); el.textContent = msg; el.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(function () { el.hidden = true; }, 3200); }
+  function openTgLink(url) { if (tg && tg.openTelegramLink && atLeast('6.1')) tg.openTelegramLink(url); else window.open(url, '_blank'); }
 
   /* Server calls */
-  function api(path, body) {
-    if (!API_URL) return Promise.reject(new Error('Payments aren’t connected yet.'));
-    if (!initData) return Promise.reject(new Error('Open this page from Telegram.'));
-    return fetch(API_URL.replace(/\/$/, '') + path, {
-      method: body ? 'POST' : 'GET',
-      headers: { 'Authorization': 'tma ' + initData, 'Content-Type': 'application/json' },
-      body: body ? JSON.stringify(body) : undefined
+  function request(path, opts) {
+    return fetch(API_URL.replace(/\/$/, '') + path, opts).catch(function () {
+      throw new Error('Can’t reach the server. Check your connection and try again.');
     }).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (d) {
         if (!r.ok) throw new Error(d.detail && typeof d.detail === 'string' ? d.detail : 'Something went wrong. Try again.');
@@ -245,86 +285,157 @@
       });
     });
   }
+  function api(path, body) {
+    if (!API_URL) return Promise.reject(new Error('Payments aren’t connected yet.'));
+    if (!initData) return Promise.reject(new Error('Open this page from Telegram.'));
+    return request(path, {
+      method: body ? 'POST' : 'GET',
+      headers: { 'Authorization': 'tma ' + initData, 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined
+    });
+  }
+  function loadConfig() {
+    if (!API_URL) return;
+    request('/api/config', {}).then(function (c) {
+      if (c.plans && c.plans.length) PLANS = c.plans;
+      if (!PLANS.some(function (p) { return p.id === state.plan; })) state.plan = PLANS[Math.min(1, PLANS.length - 1)].id;
+      cfg = c;
+      renderConfig(); renderPlans(); updateForm(); renderCamps();
+    }).catch(function () {});
+  }
   function refresh() {
     if (!API_URL || !initData) { renderCamps(); return Promise.resolve(); }
-    return api('/api/campaigns').then(function (list) { state.campaigns = list; renderCamps(); }).catch(function () { renderCamps(); });
+    return api('/api/campaigns').then(function (list) { state.campaigns = list; state.loadFailed = false; renderCamps(); })
+      .catch(function () { state.loadFailed = true; renderCamps(); });
   }
   function pay(link) {
     if (!tg || !tg.openInvoice) { toast('Open this page inside Telegram to pay.'); return; }
     tg.openInvoice(link, function (status) {
-      if (status === 'paid') toast('Paid. Your promotion is in review.');
+      if (status === 'paid') { haptic.ok(); toast('Paid. Your promotion is in review.'); }
       else if (status === 'cancelled') toast('Payment cancelled. You can pay later from Your promotions.');
-      else if (status === 'failed') toast('Payment failed. Try again.');
+      else if (status === 'failed') { haptic.bad(); toast('Payment failed. Try again.'); }
       refresh();
     });
+  }
+
+  /* Promo channel and pricing from the server */
+  function renderConfig() {
+    var f = $('follow');
+    if (cfg.channel) {
+      f.hidden = false;
+      $('follow-name').textContent = cfg.channel;
+      $('follow-sub').textContent = cfg.channel_members ? num(cfg.channel_members) + ' subscribers · see what’s being promoted' : 'See what’s being promoted';
+    }
+    var where = cfg.channel ? 'Approved promotions are posted in ' + cfg.channel + ' and removed when the time is up. ' : '';
+    $('n-plans').textContent = cfg.free
+      ? where + 'Listing is free for now. Every promotion is reviewed first.'
+      : where + 'Paid in Telegram Stars. Every promotion is reviewed first, and you get your Stars back if it isn’t approved.';
+    $('pv-tag').textContent = cfg.free ? 'Featured' : 'Sponsored';
+  }
+  $('follow').addEventListener('click', function () { if (cfg.channel) openTgLink('https://t.me/' + cfg.channel.replace('@', '')); });
+
+  /* Channel look-up while typing */
+  var lookTimer, lookSeq = 0;
+  function lookUp() {
+    clearTimeout(lookTimer);
+    var handle = cleanHandle($('f-handle').value), el = $('n-look');
+    state.look = null;
+    if (state.kind !== 'channel' || !NAME_RE.test(handle) || !API_URL || !initData) { el.hidden = true; return; }
+    el.hidden = false; el.className = 'note'; el.textContent = 'Checking @' + handle + '…';
+    var seq = ++lookSeq;
+    lookTimer = setTimeout(function () {
+      api('/api/lookup?handle=' + encodeURIComponent(handle)).then(function (d) {
+        if (seq !== lookSeq) return;
+        state.look = d;
+        el.className = 'note ok';
+        el.textContent = '✓ ' + (d.title || '@' + handle) + (d.members != null ? ' · ' + num(d.members) + ' subscribers' : '');
+        updateForm();
+      }).catch(function (err) {
+        if (seq !== lookSeq) return;
+        el.className = 'note err'; el.textContent = err.message;
+      });
+    }, 600);
   }
 
   /* Form */
   function renderPlans() {
     $('plans').innerHTML = PLANS.map(function (p) {
       var on = p.id === state.plan;
-      return '<button type="button" class="row plan" role="radio" aria-checked="' + on + '" data-p="' + p.id + '"><span class="l"><span class="chk">' + (on ? '✓' : '') + '</span><span class="k">' + p.days + ' days</span></span><span class="price">' + p.stars + ' ' + STAR + '</span></button>';
+      return '<button type="button" class="row plan" role="radio" aria-checked="' + on + '" data-p="' + esc(p.id) + '"><span class="l"><span class="chk">' + (on ? '✓' : '') + '</span><span class="k">' + p.days + ' days</span></span><span class="price">' + (cfg.free ? 'Free' : p.stars + '\u00a0' + STAR) + '</span></button>';
     }).join('');
   }
   function updateForm() {
     var text = $('f-text').value.trim(), handle = cleanHandle($('f-handle').value);
     $('text-count').textContent = $('f-text').value.length;
-    $('create').textContent = 'Pay ' + planById(state.plan).stars + ' ' + STAR + ' and submit';
+    if (!state.busy) setButton(cfg.free ? 'Submit for review' : 'Pay ' + planById(state.plan).stars + '\u00a0' + STAR + ' and submit');
     $('l-handle').textContent = state.kind === 'bot' ? 'Bot' : 'Channel';
     $('f-handle').placeholder = state.kind === 'bot' ? 'your_bot' : 'channel_name';
-    $('n-handle').textContent = state.kind === 'bot' ? 'Enter the bot\u2019s username. It ends in \u201cbot\u201d.' : 'Only public channels can be promoted. Enter the channel\u2019s public username, without the link.';
+    $('n-handle').textContent = state.kind === 'bot' ? 'Enter the bot’s username. It ends in “bot”.' : 'Only public channels can be promoted. Enter the channel’s public username or t.me link.';
     $('pv-sec').hidden = !text && !handle;
-    $('pv-who').textContent = handle ? '@' + handle : (state.kind === 'bot' ? 'Your bot' : 'Your channel');
+    $('pv-who').textContent = state.look && state.look.title ? state.look.title : (handle ? '@' + handle : (state.kind === 'bot' ? 'Your bot' : 'Your channel'));
     $('pv-text').textContent = text;
     $('pv-cta').textContent = state.kind === 'bot' ? 'Start bot' : 'Join channel';
   }
-  ['f-text', 'f-handle'].forEach(function (id) { $(id).addEventListener('input', updateForm); });
+  $('f-text').addEventListener('input', updateForm);
+  $('f-handle').addEventListener('input', function () { $('e-handle').hidden = true; lookUp(); updateForm(); });
   $('kind').addEventListener('click', function (e) {
-    var b = e.target.closest('[data-k]'); if (!b) return;
-    state.kind = b.dataset.k;
+    var b = e.target.closest('[data-k]'); if (!b || b.dataset.k === state.kind) return;
+    state.kind = b.dataset.k; haptic.tap();
     document.querySelectorAll('#kind button').forEach(function (x) { x.setAttribute('aria-checked', x === b); });
-    updateForm();
+    lookUp(); updateForm();
   });
   $('plans').addEventListener('click', function (e) {
     var b = e.target.closest('[data-p]'); if (!b) return;
-    state.plan = b.dataset.p; renderPlans(); updateForm();
+    state.plan = b.dataset.p; haptic.tap(); renderPlans(); updateForm();
   });
 
-  var LABEL = { awaiting_payment: 'Awaiting payment', in_review: 'In review', live: 'Live', rejected: 'Refunded' };
+  var LABEL = { awaiting_payment: 'Awaiting payment', in_review: 'In review', live: 'Live', ended: 'Ended', rejected: 'Not approved' };
+  function fmtDate(ts) { return new Date(ts * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }); }
   function renderCamps() {
     var c = state.campaigns;
     $('e-conn').hidden = !!API_URL;
+    if (state.loadFailed && !c.length) {
+      $('camps').innerHTML = '<div class="empty">Couldn’t load your promotions.<br><button type="button" class="retry" id="retry">Try again</button></div>';
+      return;
+    }
     $('camps').innerHTML = c.length ? c.map(function (x) {
-      return '<div class="row"><div class="camp"><div class="nm">' + esc(x.name) + '</div><div class="meta"><span class="st-' + esc(x.status) + '">' + esc(LABEL[x.status] || x.status) + '</span> · ' +
-        (x.kind === 'bot' ? 'Bot' : 'Channel') + ' · ' + x.days + ' days · ' + x.stars + ' ' + STAR + '</div></div>' +
-        (x.status === 'awaiting_payment' ? '<button type="button" class="act" data-id="' + x.id + '">Pay</button>' : '') + '</div>';
+      var label = LABEL[x.status] || x.status;
+      if (x.status === 'live' && x.until) label += ' until ' + fmtDate(x.until);
+      if (x.status === 'rejected' && x.stars) label = 'Refunded';
+      var act = x.status === 'awaiting_payment' ? '<button type="button" class="act" data-id="' + x.id + '">Pay</button>'
+        : (x.post_url ? '<button type="button" class="act" data-url="' + esc(x.post_url) + '">View</button>' : '');
+      return '<div class="row"><div class="camp"><div class="nm">' + esc(x.title || x.name) + '</div><div class="meta"><span class="st-' + esc(x.status) + '">' + esc(label) + '</span> · ' +
+        (x.kind === 'bot' ? 'Bot' : 'Channel') + ' · ' + x.days + ' days' + (x.stars ? ' · ' + x.stars + '\u00a0' + STAR : '') + '</div></div>' + act + '</div>';
     }).join('') : '<div class="empty">' + (API_URL ? 'Nothing yet. Add your channel or bot above.' : 'Your promotions will appear here once the page is connected to your bot server.') + '</div>';
   }
   $('camps').addEventListener('click', function (e) {
+    if (e.target.id === 'retry') { refresh(); return; }
+    var u = e.target.closest('[data-url]'); if (u) { openTgLink(u.dataset.url); return; }
     var b = e.target.closest('[data-id]'); if (!b) return;
-    api('/api/campaigns/' + b.dataset.id + '/invoice', {}).then(function (d) { pay(d.invoice_link); }).catch(function (err) { toast(err.message); });
+    api('/api/campaigns/' + b.dataset.id + '/invoice', {}).then(function (d) { pay(d.invoice_link); }).catch(function (err) { haptic.bad(); toast(err.message); });
   });
 
   function show(id, msg) { var el = $(id); if (msg) { el.textContent = msg; el.hidden = false; } else el.hidden = true; return !!msg; }
-  $('create').addEventListener('click', function () {
+  function submit() {
     if (state.busy) return;
     var handle = cleanHandle($('f-handle').value), text = $('f-text').value.trim();
     var herr = !NAME_RE.test(handle) ? 'Enter a valid username: 5 to 32 letters, numbers or underscores.'
       : (state.kind === 'bot' && !/bot$/i.test(handle) ? 'A bot username must end in “bot”.' : '');
     var badHandle = show('e-handle', herr);
     var badText = show('e-text', text ? '' : 'Add a short description.');
-    if (badHandle || badText) { (badHandle ? $('f-handle') : $('f-text')).focus(); return; }
-    state.busy = true; $('create').disabled = true;
+    if (badHandle || badText) { haptic.bad(); (badHandle ? $('f-handle') : $('f-text')).focus(); return; }
+    state.busy = true; setButton(cfg.free ? 'Submitting…' : 'Opening payment…', true);
     api('/api/campaigns', { plan: state.plan, kind: state.kind, handle: handle, text: text, category: $('f-cat').value, lang: $('f-lang').value })
       .then(function (d) {
-        $('form').reset(); updateForm();
+        $('form').reset(); state.look = null; $('n-look').hidden = true;
         refresh();
-        pay(d.invoice_link);
+        if (d.invoice_link) pay(d.invoice_link);
+        else { haptic.ok(); toast('Submitted. You’ll get a message once it’s reviewed.'); }
       })
-      .catch(function (err) { toast(err.message); })
-      .then(function () { state.busy = false; $('create').disabled = false; });
-  });
+      .catch(function (err) { haptic.bad(); toast(err.message); })
+      .then(function () { state.busy = false; updateForm(); });
+  }
 
-  renderPlans(); updateForm(); renderCamps(); refresh();
+  renderConfig(); renderPlans(); updateForm(); renderCamps(); refresh(); loadConfig();
 })();
 </script>
