@@ -101,6 +101,13 @@ db.commit()
 
 http = httpx.AsyncClient(timeout=40)
 BOT_USERNAME = ""  # filled in at startup from getMe
+STATUS = {"polling": False, "last_error": None, "last_error_at": None}  # shown at GET /
+
+
+def note_error(where: str, e: Exception):
+    msg = f"{where}: {e}".replace(BOT_TOKEN, "<token>")[:300]  # never show the token
+    STATUS["last_error"], STATUS["last_error_at"] = msg, time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    print(msg)
 
 
 async def tg(method: str, **params):
@@ -235,6 +242,9 @@ async def health():
     return {
         "ok": True,
         "bot": "@" + BOT_USERNAME if BOT_USERNAME else "not connected yet",
+        "receiving_messages": STATUS["polling"],
+        "last_error": STATUS["last_error"],
+        "last_error_at": STATUS["last_error_at"],
         "webapp_origin": ORIGIN or None,
         "promo_channel": "@" + PROMO_CHANNEL if PROMO_CHANNEL else None,
         "free_mode": FREE_MODE,
@@ -422,7 +432,7 @@ async def expire_loop():
         try:
             await expire_due()
         except Exception as e:
-            print("expire error:", e)
+            note_error("ending promotions", e)
         await asyncio.sleep(300)
 
 
@@ -552,7 +562,7 @@ async def poll():
             await tg("deleteWebhook")
             break
         except Exception as e:
-            print("startup error:", e)
+            note_error("startup", e)
             await asyncio.sleep(3)
     offset = 0
     while True:
@@ -564,12 +574,14 @@ async def poll():
                 allowed_updates=["pre_checkout_query", "message", "callback_query"],
             )
         except Exception as e:
-            print("poll error:", e)
+            STATUS["polling"] = False
+            note_error("getUpdates", e)
             await asyncio.sleep(3)
             continue
+        STATUS["polling"] = True
         for u in updates:
             offset = u["update_id"] + 1
             try:
                 await handle(u)
             except Exception as e:
-                print("handler error:", e)
+                note_error("handling an update", e)
