@@ -552,11 +552,13 @@ async def handle(u: dict):
             await tg("sendMessage", chat_id=c["user_id"], text=note)
 
 
-def profile_texts() -> tuple[str, str]:
+def profile_texts(channel: str = None, free: bool = None) -> tuple[str, str]:
     """(description, short description) shown on the bot's profile and in an empty chat."""
-    where = f"posted in @{PROMO_CHANNEL}" if PROMO_CHANNEL else "promoted"
-    pay = "Listing is free for now" if FREE_MODE else "Pay with Telegram Stars"
-    refund = "" if FREE_MODE else "\n• Not approved? Your Stars are refunded automatically"
+    channel = PROMO_CHANNEL if channel is None else channel
+    free = FREE_MODE if free is None else free
+    where = f"posted in @{channel}" if channel else "promoted"
+    pay = "Listing is free for now" if free else "Pay with Telegram Stars"
+    refund = "" if free else "\n• Not approved? Your Stars are refunded automatically"
     description = (
         "Get your Telegram channel or bot in front of new people.\n\n"
         "• Pick how long to run it: 3, 7 or 14 days\n"
@@ -564,7 +566,7 @@ def profile_texts() -> tuple[str, str]:
         f"• Every promotion is reviewed, then {where}{refund}\n\n"
         "Tap Start, then Open Advertise Pro."
     )
-    short = "Promote your Telegram channel or bot." + (f" Live promotions: @{PROMO_CHANNEL}" if PROMO_CHANNEL else "")
+    short = "Promote your Telegram channel or bot." + (f" Live promotions: @{channel}" if channel else "")
     return description[:512], short[:120]
 
 
@@ -578,9 +580,13 @@ async def setup_profile():
     if ORIGIN:
         await tg("setChatMenuButton", menu_button={"type": "web_app", "text": "Open", "web_app": {"url": ORIGIN + "/"}})
     description, short = profile_texts()
-    if not (await tg("getMyDescription")).get("description"):
+    # Texts this server could have written earlier (other settings). Those may be replaced; yours may not.
+    ours = [profile_texts(ch, fr) for ch in ("", PROMO_CHANNEL) for fr in (False, True)]
+    current = (await tg("getMyDescription")).get("description", "")
+    if current != description and (not current or current in [d for d, _ in ours]):
         await tg("setMyDescription", description=description)
-    if not (await tg("getMyShortDescription")).get("short_description"):
+    current = (await tg("getMyShortDescription")).get("short_description", "")
+    if current != short and (not current or current in [sd for _, sd in ours]):
         await tg("setMyShortDescription", short_description=short)
 
 
